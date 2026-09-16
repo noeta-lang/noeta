@@ -58,9 +58,11 @@ impl LangDatabase {
     /// the revision instead, which is what this does.
     ///
     /// The poll density is what makes it prompt: every tracked-query fetch checks the flag, and the
-    /// checker additionally polls once per top-level declaration (see
-    /// [`noeta_check::check_all_cancellable`]), so a long check of one large module unwinds
-    /// mid-module.
+    /// two stages that loop over a module's top-level items poll once per item — the parser (see
+    /// [`noeta_parser::parse_in_cancellable`]) and the checker (see
+    /// [`noeta_check::check_all_cancellable`]) — so a long parse or check of one large module
+    /// unwinds mid-module. Lexing has no such loop and runs to completion; it is a small enough
+    /// share of a front end that the [`tokens`] query boundary is granularity enough for it.
     ///
     /// Read the result through `noeta_ide::catch_cancelled`, which absorbs that unwind and leaves a
     /// genuine panic a panic. Calling this from inside a query on this same handle deadlocks, so it
@@ -405,7 +407,9 @@ pub fn tokens(db: &dyn salsa::Database, src: SourceProgram) -> Tokens {
     Tokens(lexed)
 }
 
-/// Parse the token stream into an AST. Depends on [`tokens`].
+/// Parse the token stream into an AST. Depends on [`tokens`]. Polls salsa's revision-cancellation
+/// check once per top-level item ([`noeta_parser::parse_in_cancellable`]), so a superseded or
+/// withdrawn request abandons the parse mid-module.
 #[salsa::tracked(returns(ref))]
 pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
     let source = source_of(db, src);
@@ -415,7 +419,13 @@ pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
     let mut names = toks.0.text_tier_decls.clone();
     names.extend(ext_verbatim_tier_names(db));
     let set = noeta_lexer::TextTiers::with(names);
-    let mut parsed = noeta_parser::parse_in(&source, &toks.0.tokens, edition_of(db, src), &set);
+    let mut parsed = noeta_parser::parse_in_cancellable(
+        &source,
+        &toks.0.tokens,
+        edition_of(db, src),
+        &set,
+        &|| db.unwind_if_revision_cancelled(),
+    );
     // Stamped for the same reason as the lex diagnostics: a few parser spans carry the default
     // entry id (see [`tokens`]).
     noeta_loader::retarget_diagnostics(&mut parsed.diagnostics, source.id());
@@ -873,7 +883,8 @@ pub fn tokens_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) ->
     Tokens(lexed)
 }
 
-/// Workspace-aware parse over [`tokens_in`] — the [`linked`] pipeline's counterpart of [`ast`].
+/// Workspace-aware parse over [`tokens_in`] — the [`linked`] pipeline's counterpart of [`ast`], and
+/// cancellable at the same per-item granularity.
 #[salsa::tracked(returns(ref))]
 pub fn ast_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> Ast {
     let source = source_of(db, src);
@@ -882,7 +893,13 @@ pub fn ast_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> As
     // source with — so a nested tier body inside a `${…}` hole re-lexes correctly (an inline
     // `@html { … }` loop), matching the loader's parser set.
     let set = workspace_text_tiers_union(db, ws);
-    let mut parsed = noeta_parser::parse_in(&source, &toks.0.tokens, edition_of(db, src), &set);
+    let mut parsed = noeta_parser::parse_in_cancellable(
+        &source,
+        &toks.0.tokens,
+        edition_of(db, src),
+        &set,
+        &|| db.unwind_if_revision_cancelled(),
+    );
     // Stamped for the same reason as in [`tokens_in`]: a parse error must name the file it is in.
     noeta_loader::retarget_diagnostics(&mut parsed.diagnostics, source.id());
     Ast(parsed)
@@ -1848,6 +1865,83 @@ mod tests {
         // The program is exactly what it was: a withdrawn question changed nothing.
         assert_eq!(src.text(&db), &text);
         // And the session still works. Shrink the program first so the recompute is cheap.
+        {
+            use salsa::Setter as _;
+            src.set_text(&mut db).to("echo 1;\n".to_string());
+        }
+        assert!(checked(&db, src).diagnostics.is_empty());
+    }
+
+    #[test]
+    fn cancel_in_flight_abandons_a_long_parse_mid_module() {
+        // The parse of one large module is a single salsa query, so without the parser's
+        // per-item poll a withdrawn request could not take effect until the whole module had been
+        // parsed. The checker's poll cannot stand in for it: the checker has not started yet.
+        seed_std();
+        let mut text = String::new();
+        for i in 0..3_000 {
+            text.push_str(&format!(
+                "fn f{i}(x: int): int {{\n  y = x + {i}\n  return y * 2\n}}\n"
+            ));
+        }
+        let source = Source::new(SourceId::FIRST, "big.noe", &text);
+
+        // The control: the same parse with nobody withdrawing it. A measured control rather than a
+        // fixed bound, because what this asserts is a ratio — the cancel returns in a fraction of
+        // a parse — and the absolute time moves with the build profile and the machine's load.
+        let control_db = LangDatabase::default();
+        let control_src = source_program(&control_db, &source, noeta_lexer::Edition::DEFAULT);
+        let _ = tokens(&control_db, control_src);
+        let start = std::time::Instant::now();
+        assert_eq!(ast(&control_db, control_src).0.program.stmts.len(), 3_000);
+        let control = start.elapsed();
+
+        let mut db = LangDatabase::default();
+        let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+        // Warm the lex so the only long work left in `ast` is the parse itself, and an observed
+        // cancellation is attributable to the poll under test.
+        let _ = tokens(&db, src);
+
+        let reader_db = db.clone();
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = std::sync::Arc::clone(&entered);
+        // A server-sized stack, because that is the parse path a server takes: below
+        // `INLINE_PARSE_HEADROOM` the parse moves to a worker thread the poll cannot reach.
+        let handle = std::thread::Builder::new()
+            .stack_size(noeta_parser::SERVER_STACK_SIZE)
+            .spawn(move || {
+                let outcome = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                    signal.store(true, std::sync::atomic::Ordering::SeqCst);
+                    ast(&reader_db, src).0.program.stmts.len()
+                }));
+                // Drop the handle before reporting: `cancel_in_flight` waits for exactly this.
+                drop(reader_db);
+                outcome
+            })
+            .expect("spawn the reader thread");
+
+        // Wait for the reader to be inside the query before withdrawing, so the cancellation lands
+        // in the parse rather than at the query boundary in front of it.
+        while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let start = std::time::Instant::now();
+        db.cancel_in_flight();
+        let cancel_elapsed = start.elapsed();
+
+        let outcome = handle.join().expect("reader thread panicked");
+        assert!(
+            outcome.is_err(),
+            "the in-flight parse must unwind with salsa::Cancelled, got {outcome:?}"
+        );
+        assert!(
+            cancel_elapsed * 4 < control,
+            "the parse ran on after the cancel: the call blocked for {cancel_elapsed:?} \
+             against an uncancelled parse of {control:?}"
+        );
+        // A withdrawn question changed nothing, and the session still answers.
+        assert_eq!(src.text(&db), &text);
         {
             use salsa::Setter as _;
             src.set_text(&mut db).to("echo 1;\n".to_string());

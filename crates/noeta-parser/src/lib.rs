@@ -281,6 +281,10 @@ pub(crate) struct Ctx<'src> {
     /// pointer because nothing outside hole parsing reads any of it, and this struct is copied into
     /// every closure of the grammar. See [`Holes`].
     holes: &'src Holes<'src>,
+    /// The cancellation poll, called once per **top-level item** by [`program_parser`]. A caller
+    /// that has no cancellation to offer passes a no-op, which is what [`parse_in`] and [`parse`]
+    /// do. See [`parse_in_cancellable`] for what a real one is and where it comes from.
+    cancel: &'src dyn Fn(),
 }
 
 impl Ctx<'_> {
@@ -1574,6 +1578,33 @@ pub fn parse_in(
     edition: Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Parsed {
+    parse_in_cancellable(source, tokens, edition, text_tiers, &|| {})
+}
+
+/// [`parse_in`], but polling `cancel` once per **top-level item**, so a parse whose answer is no
+/// longer wanted stops within one declaration instead of finishing the module.
+///
+/// This is the parser's half of the seam [`noeta_check::check_all_cancellable`] owns for the
+/// checker, and it is the same seam: the two stages loop over the same top-level items, and the
+/// poll sits at the head of that loop in both. The salsa `ast`/`ast_in` queries pass salsa's
+/// revision-cancellation poll (`db.unwind_if_revision_cancelled()`), which signals by unwinding
+/// with `salsa::Cancelled` — the grammar lets that propagate untouched, and the parse owns no
+/// partial state anything downstream can observe. Every non-salsa caller uses [`parse_in`] or
+/// [`parse`] and never cancels.
+///
+/// **`cancel` runs on whichever thread runs the grammar, which is why a deep parse is not polled.**
+/// Input past [`INLINE_NESTING_DEPTH`] (or a caller too near its own stack limit) is parsed on the
+/// [`DEEP_PARSE_STACK`] worker, and salsa's cancellation state is per-thread, so the poll cannot
+/// cross with it. Such input is polled once before the worker starts and then runs to completion.
+/// The inline path is the one a server takes: it sizes its threads to [`SERVER_STACK_SIZE`], and
+/// nesting that deep belongs to generated or pathological input rather than to written code.
+pub fn parse_in_cancellable(
+    source: &Source,
+    tokens: &[Token],
+    edition: Edition,
+    text_tiers: &noeta_lexer::TextTiers,
+    cancel: &dyn Fn(),
+) -> Parsed {
     let Prescan {
         max_depth,
         max_chain,
@@ -1612,16 +1643,27 @@ pub fn parse_in(
         // is large enough that the depth limit above — not the caller's stack — is what bounds
         // recursion. A scoped thread lets the closure borrow `source`/`tokens` directly; the owned
         // [`Parsed`] crosses the join.
+        //
+        // The last poll this parse gets: `cancel` reads thread-local state (salsa's), so it stays
+        // on this thread and the worker parses with a no-op. Asking here is what makes a request
+        // withdrawn *before* the parse begins cost nothing at all.
+        cancel();
         std::thread::scope(|scope| {
             std::thread::Builder::new()
                 .stack_size(DEEP_PARSE_STACK)
-                .spawn_scoped(scope, || parse_inner(source, tokens, edition, text_tiers))
+                .spawn_scoped(scope, || {
+                    parse_inner(source, tokens, edition, text_tiers, &|| {})
+                })
                 .expect("spawn parse worker")
                 .join()
-                .expect("parse worker panicked")
+                // Carry the worker's panic across unchanged rather than reporting that one
+                // happened: an `expect` here renders the payload as `Any { .. }`, which loses the
+                // message of a real parser panic and would flatten a cancellation unwind into an
+                // ordinary one.
+                .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
         })
     } else {
-        parse_inner(source, tokens, edition, text_tiers)
+        parse_inner(source, tokens, edition, text_tiers, cancel)
     }
 }
 
@@ -1750,6 +1792,7 @@ fn parse_inner(
     tokens: &[Token],
     edition: Edition,
     text_tiers: &noeta_lexer::TextTiers,
+    cancel: &dyn Fn(),
 ) -> Parsed {
     let diags = RefCell::new(Vec::new());
     // The parse's `${…}` hole storage — both empty, and left empty for a file with no interpolation.
@@ -1768,6 +1811,7 @@ fn parse_inner(
         diags: &diags,
         soft_terminators: &soft_terminators,
         holes: &holes,
+        cancel,
     };
     let len = source.text().len();
     let toks = weave_hard_semicolons(tokens, &boundaries, 0);
@@ -5812,7 +5856,21 @@ where
     // (an `Rc` bump) instead of rebuilding the doubly-recursive type grammar for itself — see
     // [`TypeP`] for why that construction, not parsing, used to dominate the cost of a parse.
     let type_p = type_parser(ctx).boxed();
-    recovering_list(statement_parser(ctx, type_p)).then_ignore(end())
+    // The cancellation poll, at the head of every top-level item — the parser's counterpart of the
+    // checker's per-declaration poll ([`noeta_check::check_all_cancellable`]), placed at the one
+    // loop the two stages share. A zero-width parser, so it changes nothing the grammar sees; it
+    // runs once per iteration of the recovering list, before the item's alternatives are tried.
+    //
+    // `try_map` rather than `map` because chumsky runs a parser whose output is discarded in
+    // *check* mode, and a `map` closure is skipped there (`Mode::map` ignores the function when it
+    // is not building an output). `ignore_then` discards this parser's output by definition, so a
+    // `map` here fired once for a whole module. `try_map` runs its closure under either mode,
+    // being able to fail the parse; this one never does.
+    let poll = empty().try_map(move |(), _| {
+        (ctx.cancel)();
+        Ok(())
+    });
+    recovering_list(poll.ignore_then(statement_parser(ctx, type_p))).then_ignore(end())
 }
 
 // --- String interpolation ---------------------------------------------------------
@@ -7501,6 +7559,7 @@ mod tests {
                         &lexed.tokens,
                         Edition::DEFAULT,
                         &noeta_lexer::TextTiers::default(),
+                        &|| {},
                     )
                 })
                 .expect("spawn the modeled-budget probe thread")
@@ -7797,6 +7856,7 @@ mod tests {
                         &lexed.tokens,
                         Edition::DEFAULT,
                         &noeta_lexer::TextTiers::default(),
+                        &|| {},
                     )
                 })
                 .expect("spawn the pipeline-stack probe thread")
@@ -7922,6 +7982,125 @@ mod tests {
         assert!(
             matches!(&parts[0], StrPart::Literal(s) if s == "\u{1b}"),
             "leading literal should decode to ESC: {parts:?}",
+        );
+    }
+
+    // ----- cancellation poll -----
+
+    /// A module of `count` trivial top-level declarations, each with a body, so the parse has real
+    /// per-item work in it.
+    fn top_level_items(count: usize) -> String {
+        let mut text = String::new();
+        for i in 0..count {
+            text.push_str(&format!(
+                "fn f{i}(x: int): int {{\n  y = x + {i}\n  return y * 2\n}}\n"
+            ));
+        }
+        text
+    }
+
+    /// Parse `text` on a thread of `stack` bytes, reporting how many times the poll ran and how
+    /// many top-level statements came out. The stack size is a parameter because it decides which
+    /// of the two parse paths runs — see [`parse_in_cancellable`].
+    fn polls_while_parsing(text: String, stack: usize) -> (usize, usize) {
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(move || {
+                let source = Source::new(SourceId::FIRST, "poll.noe", &text);
+                let lexed = noeta_lexer::lex(&source);
+                let calls = std::cell::Cell::new(0usize);
+                let parsed = parse_in_cancellable(
+                    &source,
+                    &lexed.tokens,
+                    Edition::DEFAULT,
+                    &noeta_lexer::TextTiers::default(),
+                    &|| calls.set(calls.get() + 1),
+                );
+                (calls.get(), parsed.program.stmts.len())
+            })
+            .expect("spawn the poll-counting thread")
+            .join()
+            .expect("the poll-counting thread panicked")
+    }
+
+    #[test]
+    fn the_cancellation_poll_runs_once_per_top_level_item() {
+        // What bounds the work a withdrawn analysis does to a single declaration. The count is one
+        // per item plus the iteration that finds end-of-input and ends the list.
+        let (polls, stmts) = polls_while_parsing(top_level_items(50), SERVER_STACK_SIZE);
+        assert_eq!(
+            stmts, 50,
+            "the fixture must actually parse, or the count proves nothing"
+        );
+        assert_eq!(
+            polls,
+            stmts + 1,
+            "the poll must run once per top-level item (plus the end-of-input iteration)"
+        );
+    }
+
+    #[test]
+    fn the_cancellation_poll_stops_the_parse_where_it_unwinds() {
+        // The poll signals by unwinding, so what matters is that the unwind leaves the grammar
+        // rather than being swallowed by a combinator — and that it stops the parse where it fired,
+        // not at the end of the module.
+        struct Withdrawn;
+        let text = top_level_items(500);
+        let outcome = std::thread::Builder::new()
+            .stack_size(SERVER_STACK_SIZE)
+            .spawn(move || {
+                let source = Source::new(SourceId::FIRST, "poll.noe", &text);
+                let lexed = noeta_lexer::lex(&source);
+                let calls = std::cell::Cell::new(0usize);
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    parse_in_cancellable(
+                        &source,
+                        &lexed.tokens,
+                        Edition::DEFAULT,
+                        &noeta_lexer::TextTiers::default(),
+                        &|| {
+                            calls.set(calls.get() + 1);
+                            if calls.get() == 10 {
+                                std::panic::panic_any(Withdrawn);
+                            }
+                        },
+                    );
+                }))
+                .map(|()| calls.get())
+                .map_err(|payload| (payload.is::<Withdrawn>(), calls.get()))
+            })
+            .expect("spawn the withdrawing thread")
+            .join()
+            .expect("the withdrawing thread panicked");
+
+        let (was_ours, polls) =
+            outcome.expect_err("the parse must not finish after the poll unwound");
+        assert!(
+            was_ours,
+            "the poll's own unwind must reach the caller unchanged"
+        );
+        assert_eq!(
+            polls, 10,
+            "the parse must stop at the item the poll unwound on"
+        );
+    }
+
+    #[test]
+    fn a_deep_parse_is_polled_once_and_then_runs_to_completion() {
+        // Input past [`INLINE_NESTING_DEPTH`] parses on the [`DEEP_PARSE_STACK`] worker, and the
+        // poll reads thread-local state, so it cannot cross with it. Such a parse is polled once,
+        // before the worker starts, and then finishes. Pinned because it is the one shape a
+        // cancelled request still pays for in full.
+        let nested = "((((((((((x))))))))))";
+        let mut text = String::new();
+        for i in 0..50 {
+            text.push_str(&format!("fn f{i}(x: int): int {{\n  return {nested}\n}}\n"));
+        }
+        let (polls, stmts) = polls_while_parsing(text, SERVER_STACK_SIZE);
+        assert_eq!(stmts, 50, "the fixture must actually parse");
+        assert_eq!(
+            polls, 1,
+            "a deep parse is polled once, before the worker it runs on starts"
         );
     }
 }

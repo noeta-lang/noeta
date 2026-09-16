@@ -198,7 +198,7 @@ A `notifications/cancelled` stops the work as well as the reply. A cancelled `ru
 | Tool | Stops at |
 |---|---|
 | `run`, `eval`, `test` | The next VM instruction, with `limit_hit` reading `cancelled`. |
-| `type_at`, `definition`, `references`, `symbols`, `code_search`, `project_docs`, `ast`, `bytecode`, `pipeline`, `module_graph`, `trace`, `impact`, `callers`, `context_map`, `path`, `architecture`, `reflect`, `format` | The checker's next declaration, or the next compiler stage. Lexing and parsing one module run to their end. |
+| `type_at`, `definition`, `references`, `symbols`, `code_search`, `project_docs`, `ast`, `bytecode`, `pipeline`, `module_graph`, `trace`, `impact`, `callers`, `context_map`, `path`, `architecture`, `reflect`, `format` | The parser's next top-level item, the checker's next declaration, or the next compiler stage. Lexing one module runs to its end. |
 | `check` | The end of the entry in flight; the next entry never starts. |
 | `debug_start`, `debug_step` | The next VM instruction, where the program parks with pause reason `cancelled`. The session stays live and `debug_step` resumes it. |
 
