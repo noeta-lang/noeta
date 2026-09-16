@@ -3,7 +3,7 @@
 // item starts the moment one finishes, so a slow item never holds a free slot idle waiting for its
 // batch-mate. Results keep input order regardless of completion order.
 //
-// Each item sleeps `n * 20` ms, so the deadlines are 20 ms apart and the interleave above is a
+// Each item sleeps `n * 100` ms, so consecutive events are 100 ms apart and the interleave above is a
 // property of the program. Five equal sleeps come due at the same poll on a real host and resume in
 // scheduler order, which also hides the difference between a sliding window and lock-step batches:
 // under equal sleeps both produce start,start,end,end,start,start.
@@ -22,7 +22,7 @@
 use std.task.{sleep, map_bounded}
 async fn dbl(n: int): int {
     echo "start " ~ n
-    sleep(n * 20).await
+    sleep(n * 100).await
     echo "end " ~ n
     return n * 2
 }

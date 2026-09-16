@@ -5,16 +5,17 @@
 // (a `race` loser is reclaimed at the scope close exactly as a normal join), then `nested()` completes and
 // the outer await observes the winner. Deterministic (ties break by list order); both backends agree.
 //
-// The gaps are 20ms apart rather than 1ms because this asserts an ORDER between sleeps, and a 1ms
-// margin is not one a loaded machine can be relied on to honour: on a slow CI runner the 3ms worker
-// won and the AOT differential reported a backend divergence that was really a scheduling artifact.
-// 20ms is still far below the 20s case timeout, and the semantics are unchanged — `y` wins by
-// construction either way.
+// The gaps are 100 ms apart because this asserts an ORDER between sleeps, and the margin has to
+// survive a loaded machine: the real host sleeps real time to the earliest deadline and wakes late,
+// so every deadline the overshoot crossed comes due at the same poll. At a 20 ms gap a loser's
+// deadline landed in the winner's poll and printed its `end` before the cancellation took effect
+// (measured: 2 failures in 200 runs of the real-host corpus gate at load 25). 100 ms is still far
+// below the 20s case timeout, and the semantics are unchanged — `y` wins by construction either way.
 // expect: stdout "x start"
 // expect: stdout "y start"
 // expect: stdout "z start"
 // expect: stdout "y end"
-// expect: stdout "winner=20"
+// expect: stdout "winner=100"
 // expect: exit 0
 use std.task.{sleep, race}
 async fn work(name: string, ms: int): int {
@@ -26,7 +27,7 @@ async fn work(name: string, ms: int): int {
 async fn nested(): int {
     mut w = 0
     concurrent {
-        rs = [spawn work("x", 60), spawn work("y", 20), spawn work("z", 40)]
+        rs = [spawn work("x", 300), spawn work("y", 100), spawn work("z", 200)]
         w = race(rs)
     }
     return w

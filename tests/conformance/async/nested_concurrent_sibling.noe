@@ -6,7 +6,7 @@
 // scopes are open simultaneously (out of structured-stack order), exercising the stable-index tombstone
 // scope model.
 //
-// The four leaves take four DISTINCT deadlines, 20 ms apart, so the end order is a property of the
+// The four leaves take four DISTINCT deadlines, 100 ms apart, so the end order is a property of the
 // program rather than of the scheduler. Equal sleeps only order under the sandbox's logical clock: on a
 // real host every deadline an overshoot crosses comes due at the same poll, and the four resume in
 // whatever order the scheduler holds them — which the header here pins and cannot.
@@ -18,7 +18,7 @@
 // expect: stdout "A2 end"
 // expect: stdout "B1 end"
 // expect: stdout "B2 end"
-// expect: stdout "total=200"
+// expect: stdout "total=1000"
 // expect: exit 0
 use std.task.{sleep}
 async fn leaf(name: string, ms: int): int {
@@ -31,13 +31,13 @@ async fn group(tag: string, ms: int): int {
     mut s = 0
     concurrent {
         x = spawn leaf(tag ~ "1", ms)
-        y = spawn leaf(tag ~ "2", ms + 20)
+        y = spawn leaf(tag ~ "2", ms + 100)
         s = x.await + y.await
     }
     return s
 }
 concurrent {
-    a = spawn group("A", 20)
-    b = spawn group("B", 60)
+    a = spawn group("A", 100)
+    b = spawn group("B", 300)
     echo "total=" ~ (a.await + b.await)
 }
