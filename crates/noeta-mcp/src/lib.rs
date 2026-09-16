@@ -2042,6 +2042,36 @@ mod tests {
     }
 
     #[test]
+    fn every_tool_says_whether_it_can_be_cancelled() {
+        // The page tells an agent's user what withdrawing a request does. A tool missing from it is
+        // not a gap a reader notices: they read the nearest row and take it, so an uncancellable
+        // tool sitting above a row about the checker reads as cancellable. Both halves come from
+        // the real thing here, the router and the shipped page, so adding a tool without placing it
+        // fails rather than misinforms.
+        let page = corpus::get_doc("Editor-and-AI-Tooling").expect("the page ships in the corpus");
+        let start = page
+            .find("### Cancelling a request")
+            .expect("the page carries the cancellation section");
+        let section = &page[start..];
+        let end = section
+            .find("\n## ")
+            .or_else(|| section.find("\n`noeta dump"))
+            .unwrap_or(section.len());
+        let section = &section[..end];
+
+        let unplaced: Vec<String> = NoetaMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .filter(|name| !section.contains(&format!("`{name}`")))
+            .collect();
+        assert!(
+            unplaced.is_empty(),
+            "these tools are in the router but not in the page's cancellation section: {unplaced:?}"
+        );
+    }
+
+    #[test]
     fn the_handshake_advertises_this_toolchain_and_its_version() {
         // `Implementation::from_build_env()` — and `Implementation::default()`, which calls it —
         // expand `CARGO_CRATE_NAME`/`CARGO_PKG_VERSION` inside the SDK, so the handshake named the

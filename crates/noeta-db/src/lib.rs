@@ -1878,6 +1878,42 @@ mod tests {
             .count()
     }
 
+    #[test]
+    fn a_cancellation_keeps_every_memo_it_did_not_interrupt() {
+        // What a cancellation costs the *next* request. `cancel_in_flight` bumps the revision, and
+        // a revision bump is how salsa is told an input changed, so the question is whether work
+        // already memoized has to be recomputed afterwards. It does not: the bump reports a write
+        // that no input actually made, so each memo revalidates by walking its dependencies, finds
+        // every one of them unchanged, and nothing re-executes.
+        //
+        // The property a shared, long-lived database would rest on: withdrawing one request must
+        // not make the next one pay again for checking the first one had already finished.
+        seed_std();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut db = logging_db(log.clone());
+        let source = Source::new(
+            SourceId::FIRST,
+            "warm.noe",
+            "fn f(x: int): int {\n  return x + 1\n}\necho f(1)\n",
+        );
+        let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+        assert!(checked(&db, src).diagnostics.is_empty());
+        assert!(
+            executions(&log, "checked") > 0,
+            "the warm-up must actually have checked something, or the reread below proves nothing"
+        );
+
+        log.lock().unwrap().clear();
+        db.cancel_in_flight();
+        assert!(checked(&db, src).diagnostics.is_empty());
+        assert_eq!(
+            executions(&log, ""),
+            0,
+            "a cancellation must not force a recompute, but these queries re-executed: {:?}",
+            log.lock().unwrap()
+        );
+    }
+
     /// A file's `@test` and `@bench` blocks are checked as two separate builds — and editing inside
     /// one must not re-check the other.
     ///

@@ -198,10 +198,10 @@ A `notifications/cancelled` stops the work as well as the reply. A cancelled `ru
 | Tool | Stops at |
 |---|---|
 | `run`, `eval`, `test` | The next VM instruction, with `limit_hit` reading `cancelled`. |
-| The analysis and graph tools | The checker's next declaration, or the next compiler stage. Lexing and parsing one module run to their end. |
+| `type_at`, `definition`, `references`, `symbols`, `code_search`, `project_docs`, `ast`, `bytecode`, `pipeline`, `module_graph`, `trace`, `impact`, `callers`, `context_map`, `path`, `architecture`, `reflect`, `format` | The checker's next declaration, or the next compiler stage. Lexing and parsing one module run to their end. |
 | `check` | The end of the entry in flight; the next entry never starts. |
 | `debug_start`, `debug_step` | The next VM instruction, where the program parks with pause reason `cancelled`. The session stays live and `debug_step` resumes it. |
 
-The tools that read the bundled documentation, example and signature corpora (`docs_search`, `docs_get`, `examples_find`, `stdlib_api`, `explain_diagnostic`) answer from memory in a few milliseconds, and so run to completion. So do `debug_inspect`, `debug_stop` and `debug_eval`, each of which is bounded by the session's own budget.
+Every other tool runs to completion, because each finishes inside the time it takes to withdraw it. `docs_search`, `docs_get`, `examples_find`, `stdlib_api`, `doc_browse`, `doc_page` and `explain_diagnostic` read the bundled documentation, example and signature corpora from memory. `completions` and `signature` parse the one file the position sits in. `debug_inspect`, `debug_stop` and `debug_eval` are each bounded by the session's own budget.
 
 `noeta dump <file>` is useful to an agent or a human alongside these: it prints the exact VM bytecode a program compiles to, which fast paths fired, and how names and constants are laid out. See [The CLI](The-CLI#noeta-dump).
