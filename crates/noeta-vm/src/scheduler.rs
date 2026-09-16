@@ -235,6 +235,10 @@ impl<'m> Vm<'m> {
     /// pre-existing behavior — park a 5 ms quantum and keep looping — since it cannot judge a global
     /// deadlock (its counterparty may live on a thread it does not track), so it never false-positives.
     pub(crate) fn isolate_in_flight_wait(&self, seen: u64) -> bool {
+        // The poll that found nothing has already happened; the state this reads below is read now.
+        // Dev-only knob, no-op unless `NOETA_ISOLATE_STALL_CHECK_DELAY_MS` is set: open that gap so a
+        // test can land a send and a close inside it rather than racing the OS for the placement.
+        isolate::stall_check_delay();
         let cross_thread_pending = self.isolates.inflight_isolates > 0
             || self
                 .persist

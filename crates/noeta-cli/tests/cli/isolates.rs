@@ -507,17 +507,28 @@ fn run_real_isolate_spawn_window_still_detects_a_real_deadlock() {
         .stderr(predicate::str::contains("deadlock"));
 }
 
+// A receiver decides whether it is stalled from what its last poll saw, and reads the channel state
+// it judges itself by a moment later. A sender on another thread that pushes and closes inside that
+// gap leaves the receiver judging a closed channel that holds its own message. Reading the closed
+// flag alone calls that an absent counterparty and aborts with E0010, one poll away from the value.
+//
+// Racing for the gap is not worth running as a test: on a loaded box this placement lands about one
+// run in ten, and on a quiet one it does not land at all, so the case would pass without ever
+// reaching its claim. `NOETA_ISOLATE_STALL_CHECK_DELAY_MS` holds the receiver in the gap instead, and
+// `NOETA_ISOLATE_SPAWN_DELAY_MS` keeps the sender out of it until the receiver is in it. The two
+// together make the ordering the test names the ordering it gets.
+
+/// Holds the receiver in the gap between its poll and its stall check. Longer than the spawn delay
+/// below by enough that the sender's send and close land while the receiver is still in there.
+const STALL_CHECK_DELAY_MS: &str = "750";
+
+/// Keeps the sender out of the gap until the receiver has reached it: the worker's thread starts,
+/// runs to its first `recv`, finds the channel empty, and enters the stall check, all while the
+/// parent is still inside the spawn.
+const SENDER_HOLD_MS: &str = "250";
+
 #[test]
 fn run_real_isolate_closed_channel_still_delivers_its_queued_message() {
-    // A receiver decides it is stalled from what it saw one poll ago: queue empty, channel open. A
-    // sender on another thread that pushes and closes in between leaves it looking at a closed
-    // channel holding its own message, and reading the closed flag alone reports "no counterparty"
-    // and aborts with E0010 one poll away from the value.
-    //
-    // Sending and closing back to back is what puts the push and the close inside that gap, and the
-    // spawn delay parks each worker on an empty channel first so the gap is the only thing left to
-    // land in. Ten workers per run rather than one, because the window is a scheduling accident and
-    // one sample of it is not worth running.
     let file = temp_program(
         "isolate_closed_channel_drain",
         "async fn waiter(rx: Receiver<int>): int {\n\
@@ -525,9 +536,6 @@ fn run_real_isolate_closed_channel_still_delivers_its_queued_message() {
          return match r { some(x) => x, none => 0 }\n\
          }\n\
          async fn run(): int {\n\
-         mut total = 0\n\
-         mut i = 0\n\
-         while i < 10 {\n\
          (tx, rx) = channel::<int>(1)\n\
          mut got = 0\n\
          concurrent {\n\
@@ -536,21 +544,19 @@ fn run_real_isolate_closed_channel_still_delivers_its_queued_message() {
          tx.close()\n\
          got = h.await\n\
          }\n\
-         total = total + got\n\
-         i = i + 1\n\
-         }\n\
-         return total\n\
+         return got\n\
          }\n\
          echo run().await",
     );
     lang()
         .arg("run")
         .arg(&file)
-        .env("NOETA_ISOLATE_SPAWN_DELAY_MS", "25")
+        .env("NOETA_ISOLATE_STALL_CHECK_DELAY_MS", STALL_CHECK_DELAY_MS)
+        .env("NOETA_ISOLATE_SPAWN_DELAY_MS", SENDER_HOLD_MS)
         .timeout(std::time::Duration::from_secs(60))
         .assert()
         .success()
-        .stdout("70\n");
+        .stdout("7\n");
 }
 
 // --- real-path cancellation (isolate-cancel) ----------------------------------------

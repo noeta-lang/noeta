@@ -205,6 +205,28 @@ pub static STALL: StallRegistry = StallRegistry::new();
 /// can stretch to milliseconds on a loaded machine. That is a race to reproduce and a certainty to
 /// assert, so this knob puts the parent in the window on demand and a test reads the registry's
 /// accounting there without racing for it. Unset (the default) costs one cached load per real spawn.
+/// Dev-only **stall-check delay** (`NOETA_ISOLATE_STALL_CHECK_DELAY_MS`, read once per process): how
+/// long a scheduler that has just found no local progress waits before reading the cross-thread state
+/// it judges itself by.
+///
+/// A scheduler decides whether it is stalled from what its last poll saw, and reads the channels a
+/// moment later. On a loaded machine that gap stretches, and another thread's send and close can land
+/// inside it, so the reader judges itself against a channel state its poll never saw. This knob opens
+/// the gap on demand, which is what lets a test put a message there instead of racing the OS
+/// scheduler for the same placement. Unset (the default) costs one cached load per stall round.
+pub fn stall_check_delay() {
+    static DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY_MS.get_or_init(|| {
+        std::env::var("NOETA_ISOLATE_STALL_CHECK_DELAY_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 pub fn spawn_window_delay() {
     static DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let ms = *DELAY_MS.get_or_init(|| {
