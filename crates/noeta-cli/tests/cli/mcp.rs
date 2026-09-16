@@ -73,6 +73,8 @@ struct Session {
     /// that did or did not arrive, and the reason a reply did not arrive is on this stream.
     log: noeta_test_temp::ServerLog,
     next_id: u64,
+    /// The `initialize` reply, kept so a test can read what the server said it is.
+    init: serde_json::Value,
 }
 
 impl Session {
@@ -95,6 +97,7 @@ impl Session {
             stdout,
             log,
             next_id: 1,
+            init: serde_json::Value::Null,
         };
         let init = session.request(
             "initialize",
@@ -112,6 +115,7 @@ impl Session {
                 .explain(format!("initialize should succeed: {init}"))
         );
         session.notify("notifications/initialized");
+        session.init = init;
         session
     }
 
@@ -179,6 +183,28 @@ impl Drop for Session {
         drop(self.child.stdin.take());
         let _ = self.child.wait();
     }
+}
+
+#[test]
+fn mcp_handshake_names_this_toolchain_and_its_version() {
+    // Read off the wire, not off `get_info`: what a client displays and logs is the `serverInfo`
+    // object in the `initialize` reply, and the SDK fills that in from *its* build environment
+    // unless the server overrides it — so a server that advertises the SDK looks correct in every
+    // in-process assertion and wrong in every client.
+    let session = Session::start();
+    let server_info = &session.init["result"]["serverInfo"];
+    assert_eq!(
+        server_info["name"].as_str(),
+        Some("noeta"),
+        "the handshake must name this toolchain: {}",
+        session.init
+    );
+    assert_eq!(
+        server_info["version"].as_str(),
+        Some(env!("CARGO_PKG_VERSION")),
+        "the handshake must carry the `noeta` binary's own version: {}",
+        session.init
+    );
 }
 
 #[test]

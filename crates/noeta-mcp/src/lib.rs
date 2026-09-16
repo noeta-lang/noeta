@@ -1300,6 +1300,25 @@ real CI-tested example programs that raise it and the docs that cover it. Call t
     }
 }
 
+/// The programmatic server name in the `initialize` handshake: the command a user writes in a
+/// client's server config (`noeta mcp`), so the entry in a client's server list reads as the
+/// toolchain they installed.
+const SERVER_NAME: &str = "noeta";
+
+/// Who this server says it is in the `initialize` handshake.
+///
+/// Built here rather than from `Implementation::from_build_env()` (which is also
+/// `Implementation::default()`, and what `ServerInfo::default()` fills in): those expand
+/// `CARGO_CRATE_NAME`/`CARGO_PKG_VERSION` where they are *written*, which is inside the SDK — so
+/// the handshake advertised the SDK's crate name and the SDK's version, and the toolchain's own
+/// version never reached a client or anything keyed on it. The `env!`s below expand in this crate,
+/// whose version is the workspace version the `noeta` binary ships under.
+fn server_identity() -> Implementation {
+    Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION"))
+        .with_title("Noeta")
+        .with_website_url("https://noeta.dev")
+}
+
 #[tool_handler]
 impl ServerHandler for NoetaMcp {
     /// Dispatch one `tools/call`, **containing a panic in the tool** rather than letting it end the
@@ -1332,7 +1351,7 @@ impl ServerHandler for NoetaMcp {
             .enable_tools()
             .enable_resources()
             .build();
-        info.server_info = Implementation::from_build_env();
+        info.server_info = server_identity();
         info.instructions = Some(INSTRUCTIONS.to_string());
         info
     }
@@ -1917,6 +1936,24 @@ mod tests {
                 .contains("check")
         );
         assert!(info.capabilities.tools.is_some());
+    }
+
+    #[test]
+    fn the_handshake_advertises_this_toolchain_and_its_version() {
+        // `Implementation::from_build_env()` — and `Implementation::default()`, which calls it —
+        // expand `CARGO_CRATE_NAME`/`CARGO_PKG_VERSION` inside the SDK, so the handshake named the
+        // SDK and carried the SDK's version. A client's server list, and anything keyed on the
+        // version, then described a dependency instead of this toolchain.
+        let info = NoetaMcp::new().get_info();
+        assert_eq!(info.server_info.name, "noeta");
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+        // The version is the workspace version the `noeta` binary ships under, not a version the
+        // SDK happens to be at: pin it to the crate that builds *this* server.
+        assert_ne!(
+            info.server_info.version,
+            rmcp::model::Implementation::from_build_env().version,
+            "the advertised version must not be the SDK's"
+        );
     }
 
     #[tokio::test]
