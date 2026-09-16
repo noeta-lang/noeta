@@ -17,7 +17,7 @@
 // expect: stdout "DELETE /users/42"
 // expect: stdout "POST /form"
 // expect: stdout "GET /ws"
-// expect: stdout "open: false"
+// expect: stdout "closed: false"
 // expect: stdout "client left after 3 frames"
 // expect: stdout "served"
 // expect: exit 0
@@ -25,8 +25,8 @@ use std.http.server
 use std.http.{Request, Response, SseSink, Frame}
 
 async fn events(sink: SseSink): bool {
-    // A fresh stream has a client on the other end.
-    echo "open: ${sink.closed()}"
+    // A fresh stream has a client on the other end, so the predicate reads false.
+    echo "closed: ${sink.closed()}"
 
     // The shape a ticking session wants: push until the client is gone, then return and let the
     // connection go. The loop is bounded by the client's departure and by nothing else.

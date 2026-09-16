@@ -466,6 +466,11 @@ pub trait Console {
     /// one line of response — the single interactive path that survives batch-captured output.
     /// `None` at EOF. In the sandbox this is deterministic: it returns the next scripted stdin line
     /// and does not write anywhere observable.
+    ///
+    /// Bypassing the buffer is why `std.io`'s `prompt` is a ctx function: it drains the backend's
+    /// output through [`crate::NativeCtx::flush_output`] before calling this, so a fragment written
+    /// with `io.out` reaches the terminal ahead of the prompt that follows it. A host implementing
+    /// this writes `msg` and reads a line; the ordering is settled above it.
     fn prompt(&mut self, msg: &str) -> Option<String>;
 
     /// Stream program output that has **already been produced** straight to the real terminal,

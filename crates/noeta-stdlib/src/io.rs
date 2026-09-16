@@ -6,11 +6,15 @@
 //! - `out(x)` / `outln(x)` → the stdout buffer (the same buffer the `echo` keyword writes to);
 //! - `err(x)` / `errln(x)` → the stderr buffer.
 //!
-//! `flush()` joins them as the fifth ctx function. A live host drains **completed lines**, so a
-//! partial one sits in the buffer until something terminates it; `flush()` pushes it now, which is
-//! what a prompt without a newline and a non-line-oriented wire format both need. It routes through
+//! `flush()` joins them as a ctx function. A live host drains **completed lines**, so a partial one
+//! sits in the buffer until something terminates it; `flush()` pushes it now, which is what a prompt
+//! without a newline and a non-line-oriented wire format both need. It routes through
 //! [`NativeCtx::flush_output`], whose take-then-restore leaves a batch host's buffers byte-identical,
 //! so the two backends agree on it the same way they agree on the writers.
+//!
+//! `prompt()` is a ctx function for the same reason it needs one: it writes to the terminal ahead of
+//! the batch buffer, so it drains that buffer before the terminal sees the prompt. Otherwise the
+//! `io.out("Name: ")` it was written to follow would arrive after it.
 //!
 //! The `*ln` variants append a trailing newline; the bare ones write raw. They reach the buffers
 //! through [`NativeCtx::write_stdout`] / [`NativeCtx::write_stderr`] — the seam that lets an ordinary
@@ -23,14 +27,15 @@
 //! their canonical routine, not a re-derivation). `echo` (the stdout-line keyword) is untouched;
 //! `io.outln(x)` is its programmatic twin.
 
-use noeta_ext_abi::args::{want_arity, want_str};
+use noeta_ext_abi::args::want_arity;
 use noeta_ext_abi::registry::{ExtFn, NativeOut, NativeValue, RetTy, Scalar, SigType};
 use noeta_ext_abi::{
     CtxError, CtxOut, Host, NativeCtx, Slot, StdError, Stream, ctx_arity, no_function_error,
 };
 
-/// `std.io`'s functions — all ctx functions (they reach the backend's stdout/stderr buffers and its
-/// canonical render through the [`NativeCtx`] seam). Each takes any value (`Dyn`) and returns unit.
+/// `std.io`'s ctx functions — the ones that reach the backend's stdout/stderr buffers, its canonical
+/// render, or its output-draining seam through [`NativeCtx`]. The four writers take any value
+/// (`Dyn`) and return unit; `flush` and `prompt` are here because both touch the buffers.
 pub const IO_CTX_FNS: &[ExtFn] = &[
     ExtFn {
         param_names: &["value"],
@@ -63,6 +68,17 @@ pub const IO_CTX_FNS: &[ExtFn] = &[
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
     },
+    // Write `msg` to the terminal now (bypassing the batch buffer) and read one line — the single
+    // interactive path. `none` at EOF.
+    //
+    // A **ctx** function, unlike the rest of the stdin surface, because it writes to the terminal
+    // ahead of the batch buffer and so must drain that buffer first: see [`io_ctx_dispatch`].
+    ExtFn {
+        param_names: &["message"],
+        name: "prompt",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Option(&SigType::String)),
+    },
 ];
 
 /// `std.io` ctx dispatch. Generic over the concrete ctx (`C: NativeCtx + ?Sized`) so a compiled-in
@@ -78,6 +94,22 @@ pub fn io_ctx_dispatch<C: NativeCtx + ?Sized>(
         ctx_arity(func, args, 0)?;
         ctx.flush_output();
         return Ok(CtxOut::Out(NativeOut::Unit));
+    }
+    // `prompt` takes a string it does not render, and reaches the host rather than a buffer.
+    if func == "prompt" {
+        ctx_arity(func, args, 1)?;
+        let NativeValue::Str(msg) = ctx.view(args[0])? else {
+            return Err(noeta_ext_abi::type_error("prompt", "string").into());
+        };
+        // Drain first. `prompt` writes to the terminal ahead of the batch buffer, and a live host
+        // streams only completed lines, so the `io.out("Name: ")` a prompt is written to follow
+        // would otherwise reach the terminal after the prompt itself. Flushing here is what makes
+        // the ordinary prompt read in the order it was written, without the program saying so.
+        ctx.flush_output();
+        return Ok(CtxOut::Out(match ctx.host().prompt(&msg) {
+            Some(line) => NativeOut::Some(Box::new(NativeOut::Str(line))),
+            None => NativeOut::None,
+        }));
     }
     ctx_arity(func, args, 1)?;
     // Render through the backend's own display path (echo-identical, `to_string`-aware).
@@ -99,7 +131,10 @@ pub fn io_ctx_dispatch<C: NativeCtx + ?Sized>(
 }
 
 /// `std.io`'s **host-backed** functions — the stdin and terminal-ness
-/// surface of the [`Console`] capability. Unlike the ctx functions above (which reach the backends'
+/// surface of the [`Console`] capability. `prompt` belongs to the same capability but dispatches
+/// through [`IO_CTX_FNS`], because it must drain the backend's buffers before the terminal sees it.
+///
+/// Unlike the ctx functions above (which reach the backends'
 /// output buffers), these are plain host effects — a scripted fixture in the sandbox, real I/O on
 /// `RealHost` — so they marshal through the ordinary [`Host`] dispatch, exactly like `env`/`os`.
 /// Their names are disjoint from [`IO_CTX_FNS`], so the module's two dispatch tables never collide.
@@ -132,14 +167,6 @@ pub const IO_FNS: &[ExtFn] = &[
         params: &[],
         ret: RetTy::Concrete(SigType::Bool),
     },
-    // Write `msg` to the terminal now (bypassing the batch buffer) and read one line — the single
-    // interactive path. `none` at EOF.
-    ExtFn {
-        param_names: &["message"],
-        name: "prompt",
-        params: &[SigType::String],
-        ret: RetTy::Concrete(SigType::Option(&SigType::String)),
-    },
 ];
 
 /// `std.io`'s host-backed dispatch — mirrors `env_dispatch`: it threads the
@@ -171,14 +198,6 @@ pub fn io_dispatch(
         "stdin_is_tty" => {
             want_arity(func, args, 0)?;
             Ok(NativeOut::Scalar(Scalar::Bool(host.is_tty(Stream::Stdin))))
-        }
-        "prompt" => {
-            want_arity(func, args, 1)?;
-            let msg = want_str(func, args, 0)?;
-            Ok(match host.prompt(msg) {
-                Some(line) => NativeOut::Some(Box::new(NativeOut::Str(line))),
-                None => NativeOut::None,
-            })
         }
         _ => Err(no_function_error("io", func)),
     }

@@ -298,7 +298,14 @@ async fn both(): int {
 
 On a live run (`noeta run`, `noeta serve`) output streams as it is produced, so a worker's completed lines reach the terminal immediately rather than waiting for the join, and only an unterminated last line waits. Where output is *collected* rather than streamed, under `noeta test`, `--json`, or an embedder reading the run's result, the block rule above is what you get.
 
-`io.flush()` sends both buffers to the terminal now, whole line or not. It is what a fragment needs when the bytes have to arrive before the line that ends them, as a prompt written with `io.out` does and as a progress indicator redrawing one line does. A run whose output is collected keeps its buffers, so a flushing program and a silent one produce the same bytes there.
+`io.flush()` sends both buffers to the terminal now, whole line or not. It is what a fragment needs when the bytes have to arrive before the line that ends them, as a progress indicator redrawing one line does and as a wire format that is not line-oriented does. A run whose output is collected keeps its buffers, so a flushing program and a silent one produce the same bytes there.
+
+`io.prompt(msg)` drains the buffers itself before it writes, so a label and its prompt read back in the order they were written:
+
+```noeta ignore
+io.out("Name: ")
+name = io.prompt("> ") ?? "anonymous"
+```
 
 ## Channels
 

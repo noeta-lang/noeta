@@ -194,3 +194,77 @@ fn an_unflushed_fragment_waits_for_the_line_that_ends_it() {
         ))
     );
 }
+
+/// A prompt appears after the fragment it was written to follow.
+///
+/// `io.prompt` writes to the terminal ahead of the batch buffer, and a live run streams only
+/// completed lines, so the `io.out("Name: ")` before it is still in the buffer when the prompt
+/// lands. Reading the two back in the order the program wrote them is what a prompt is for, and it
+/// is the ordinary shape: a label with no newline, then the read.
+///
+/// Both of the child's streams go to **one file**, which is the only way to see the order at all:
+/// the fragment goes to stdout and the prompt to stderr, so two separate sinks would each look
+/// perfectly ordered on their own. The two descriptors are clones of one open file, so they share
+/// an offset and the transcript is the real write order.
+#[test]
+fn a_prompt_lands_after_the_fragment_it_follows() {
+    /// The fragment, written with no newline to terminate it.
+    const FRAGMENT: &str = "FRAGMENT-FIRST";
+    /// The prompt's own message, written straight to the terminal.
+    const PROMPT: &str = "PROMPT-SECOND";
+
+    let dir = scratch("prompt-order");
+    let program = dir.join("prompt_order.noe");
+    std::fs::write(
+        &program,
+        format!(
+            r#"use std.io
+
+io.out("{FRAGMENT}")
+answer = io.prompt("{PROMPT}") ?? "none"
+io.outln("")
+io.outln("read ${{answer}}")
+"#
+        ),
+    )
+    .expect("write the fixture program");
+
+    let transcript_path = dir.join("transcript.txt");
+    let transcript = std::fs::File::create(&transcript_path).expect("create the transcript");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
+        .args(["run", program.to_str().unwrap()])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(
+            transcript.try_clone().expect("dup the transcript"),
+        ))
+        .stderr(std::process::Stdio::from(transcript))
+        .spawn()
+        .expect("spawn `noeta run`");
+
+    // Answer the read so the program finishes. Its stdin is the only thing it waits on.
+    let mut stdin = child.stdin.take().expect("the child's stdin");
+    let _ = stdin.write_all(b"ada\n");
+    let _ = stdin.flush();
+    drop(stdin);
+    let status = child.wait().expect("wait for the child");
+
+    let seen = std::fs::read_to_string(&transcript_path).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(status.success(), "the program failed: {seen:?}");
+    let fragment_at = seen
+        .find(FRAGMENT)
+        .unwrap_or_else(|| panic!("the fragment never appeared at all: {seen:?}"));
+    let prompt_at = seen
+        .find(PROMPT)
+        .unwrap_or_else(|| panic!("the prompt never appeared at all: {seen:?}"));
+    assert!(
+        fragment_at < prompt_at,
+        "the prompt reached the terminal before the fragment it was written to follow, so a \
+         `io.out(\"Name: \")` before a prompt reads back inside out: {seen:?}"
+    );
+    assert!(
+        seen.contains("read ada"),
+        "the program's answer is missing from {seen:?}"
+    );
+}

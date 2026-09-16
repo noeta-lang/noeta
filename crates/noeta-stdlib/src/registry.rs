@@ -5365,7 +5365,8 @@ const IO_DOCS: &[(&str, &str)] = &[
         "flush",
         "Push everything written to standard output and standard error so far to the terminal, \
          whole line or not. A running program streams completed lines, so a partial one waits for \
-         the newline that ends it — call this to send a prompt or a progress indicator now.",
+         the newline that ends it — call this to send a progress indicator, or any output whose \
+         shape is not a line, while the program is still working.",
     ),
     (
         "stdin_line",
@@ -5390,7 +5391,8 @@ const IO_DOCS: &[(&str, &str)] = &[
         "prompt",
         "Write `msg` to the terminal immediately (bypassing the batch output buffer) and read one \
          line of response — the single interactive path that survives batch-captured output. \
-         `none` at end of input.",
+         Anything already written is flushed first, so `io.out(\"Name: \")` before a prompt reaches \
+         the terminal before the prompt does. `none` at end of input.",
     ),
 ];
 
