@@ -523,6 +523,7 @@ impl ExternIo for RealSseSendIo {
             }
             .await;
             match outcome {
+                Ok(()) if peer_is_gone(&stream) => Ok(NativeOut::Unit),
                 Ok(()) => {
                     sse_conns.lock().unwrap().insert(conn, stream);
                     Ok(NativeOut::Unit)
@@ -531,6 +532,22 @@ impl ExternIo for RealSseSendIo {
                 Err(_) => Ok(NativeOut::Unit),
             }
         })))
+    }
+}
+
+/// Whether the client on an event-stream connection has left, read without blocking.
+///
+/// A departed client is invisible to the write that precedes it: the kernel takes the bytes, the
+/// peer answers with a reset, and only the *next* write fails. One non-blocking read closes that
+/// gap, because the client's close reaches this side as an end-of-file the moment it happens. A
+/// client that says something instead is alive; an event stream has no use for the words, and
+/// leaving them in the receive buffer costs nothing.
+fn peer_is_gone(stream: &TcpStream) -> bool {
+    let mut probe = [0u8; 1];
+    match stream.try_read(&mut probe) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
     }
 }
 

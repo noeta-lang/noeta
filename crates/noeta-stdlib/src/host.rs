@@ -259,9 +259,10 @@ struct InboundState {
     ws_conns: BTreeMap<u64, usize>,
     ws_transcript: Vec<(u64, String)>,
     /// Connections switched to `text/event-stream` — the SSE analogue of
-    /// `ws_conns`. A set rather than a map: unlike a websocket there is no inbound conversation to
-    /// keep a cursor into, only outbound frames.
-    sse_conns: std::collections::BTreeSet<u64>,
+    /// `ws_conns`, the value counting the writes the session has made on each. An event stream has
+    /// no inbound conversation to keep a cursor into, so the count is what the scripted client's
+    /// departure is measured against ([`crate::net::SANDBOX_SSE_CLIENT_WRITES`]).
+    sse_conns: BTreeMap<u64, usize>,
     /// The event-stream bytes each handler wrote, in order (test introspection, like
     /// `ws_transcript`).
     sse_transcript: Vec<(u64, String)>,
@@ -519,7 +520,7 @@ impl Network for SandboxHost {
             transcript: Vec::new(),
             ws_conns: BTreeMap::new(),
             ws_transcript: Vec::new(),
-            sse_conns: std::collections::BTreeSet::new(),
+            sse_conns: BTreeMap::new(),
             sse_transcript: Vec::new(),
         });
         Ok(1)
@@ -681,19 +682,46 @@ impl Network for SandboxHost {
             .as_mut()
             .expect("net_sse_start_now before net_listen")
             .sse_conns
-            .insert(conn);
+            .insert(conn, 0);
         Ok(())
     }
 
     /// Record the handler's outbound event-stream bytes (test introspection; the differential
-    /// observes the handler's own output, exactly like replies and ws frames).
+    /// observes the handler's own output, exactly like replies and ws frames), and advance the
+    /// connection's write count toward the scripted client's departure.
+    ///
+    /// Once the client has gone the frame is **dropped** and nothing is recorded, which is what a
+    /// real host does with a write to a socket whose peer is away. The call still succeeds: a
+    /// disconnect is ordinary for an event stream, and [`Network::net_sse_is_closed`] is where a
+    /// session reads it.
     fn net_sse_send_now(&mut self, conn: u64, wire: &str) -> Result<(), StdError> {
-        self.inbound
+        let state = self
+            .inbound
             .as_mut()
-            .expect("net_sse_send_now before net_listen")
-            .sse_transcript
-            .push((conn, wire.to_string()));
+            .expect("net_sse_send_now before net_listen");
+        match state.sse_conns.get_mut(&conn) {
+            Some(writes) if *writes < crate::net::SANDBOX_SSE_CLIENT_WRITES => {
+                *writes += 1;
+                state.sse_transcript.push((conn, wire.to_string()));
+            }
+            // Gone (departed, or closed by the session): the write lands nowhere.
+            _ => {}
+        }
         Ok(())
+    }
+
+    /// Whether the scripted client on `conn` has left — after
+    /// [`crate::net::SANDBOX_SSE_CLIENT_WRITES`] writes, or once the session closed the stream
+    /// itself. Deterministic: it reads the count `net_sse_send_now` advances, so a pushing session
+    /// stops at the same frame in both backends.
+    fn net_sse_is_closed(&self, conn: u64) -> bool {
+        let Some(state) = self.inbound.as_ref() else {
+            return true;
+        };
+        match state.sse_conns.get(&conn) {
+            Some(writes) => *writes >= crate::net::SANDBOX_SSE_CLIENT_WRITES,
+            None => true,
+        }
     }
 
     fn net_sse_close_now(&mut self, conn: u64) -> Result<(), StdError> {
@@ -1668,6 +1696,72 @@ mod tests {
             host.sse_transcript().len(),
             2,
             "closing writes nothing to the transcript"
+        );
+    }
+
+    /// The scripted event-stream client leaves after [`crate::net::SANDBOX_SSE_CLIENT_WRITES`]
+    /// writes, and everything after that lands nowhere — the sandbox's model of a browser that
+    /// closed the tab, and what makes `SseSink.closed()` reachable under the differential.
+    ///
+    /// Asserted against the constant rather than a hardcoded count, so raising the budget costs a
+    /// corpus update (the conformance case pins the frame count in its output) and not a hunt for
+    /// stale integers here.
+    #[test]
+    fn an_event_stream_client_departs_after_the_scripted_writes() {
+        use noeta_ext_abi::stream::Frame;
+
+        let budget = crate::net::SANDBOX_SSE_CLIENT_WRITES;
+        let mut host = SandboxHost::new();
+        host.net_listen("127.0.0.1:0").unwrap();
+
+        assert!(
+            host.net_sse_is_closed(7),
+            "a connection that never started an event stream has no client"
+        );
+        host.net_sse_start_now(7).unwrap();
+        assert!(
+            !host.net_sse_is_closed(7),
+            "a fresh event stream has a client on the other end"
+        );
+
+        for i in 0..budget {
+            assert!(
+                !host.net_sse_is_closed(7),
+                "the client is still reading at write {i} of {budget}"
+            );
+            host.net_sse_send_now(7, &Frame::data(format!("{i}")).to_sse_wire())
+                .unwrap();
+        }
+
+        assert!(
+            host.net_sse_is_closed(7),
+            "the client leaves once it has read {budget} writes"
+        );
+        assert_eq!(
+            host.sse_transcript().len(),
+            budget,
+            "every write before the departure is on the wire"
+        );
+
+        // A write to a departed client succeeds and goes nowhere, exactly as it does on a real
+        // socket: a disconnect is ordinary for an event stream, not a program error.
+        host.net_sse_send_now(7, &Frame::data("after").to_sse_wire())
+            .unwrap();
+        assert_eq!(
+            host.sse_transcript().len(),
+            budget,
+            "a frame written after the client left is dropped rather than recorded"
+        );
+        assert!(host.net_sse_is_closed(7), "and it stays closed");
+
+        // A session that closes its own stream reads as closed too, so one check covers both ways
+        // a stream ends.
+        host.net_sse_start_now(8).unwrap();
+        assert!(!host.net_sse_is_closed(8));
+        host.net_sse_close_now(8).unwrap();
+        assert!(
+            host.net_sse_is_closed(8),
+            "a stream the session closed has no client either"
         );
     }
 

@@ -100,6 +100,16 @@ pub fn sandbox_ws_client_frames() -> Vec<String> {
     vec!["first frame".to_string(), "second frame".to_string()]
 }
 
+/// How many writes the sandbox's scripted **event-stream client** stays for before it goes away.
+///
+/// An SSE client speaks only by leaving, so the sandbox scripts the departure the way
+/// [`sandbox_ws_client_frames`] scripts a conversation: after this many frames or comments on a
+/// connection, `SseSink.closed()` answers `true` and further writes are dropped, exactly as a real
+/// host drops a frame written to a socket whose peer is gone. It counts the session's **own**
+/// writes, so both backends reach the departure at the same point and a pushing session terminates
+/// in-oracle.
+pub const SANDBOX_SSE_CLIENT_WRITES: usize = 3;
+
 /// The sandbox's deterministic **streaming** response body — the incremental
 /// twin of [`sandbox_respond`], and a pure function of the request for the same reason: both
 /// backends must compute the identical byte sequence or the differential cannot hold.

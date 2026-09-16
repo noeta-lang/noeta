@@ -626,15 +626,23 @@ fn run_async_metadata_twins_on_the_real_executor() {
 #[test]
 #[ignore = "hits the real network; run explicitly"]
 fn run_http_get_over_the_real_network() {
-    // On the real host `http.get` (sync) and `http.get_async(...).await`
+    // On the real host `client.get` (sync) and `client.get_async(...).await`
     // (RealBody::Async on the executor's runtime) both reach a live endpoint. `#[ignore]` so CI
     // stays hermetic — run explicitly when online.
-    let src = "use std.{http}\n\
-               async fn run(): void {\n\
-               \x20   echo http.get(\"https://example.com/\").status()\n\
-               \x20   echo http.get_async(\"https://example.com/\").await.ok()\n\
-               }\n\
-               run().await\n";
+    //
+    // The verbs answer `Result<Response, HttpError>`, so `?` is what separates "the request never
+    // got off the ground" from a status the server actually sent; `status()` and `ok()` then read
+    // the response itself.
+    let src = r#"use std.http.client
+use std.http.HttpError
+
+async fn run(): Result<void, HttpError> {
+    echo client.get("https://example.com/")?.status()
+    echo client.get_async("https://example.com/").await?.ok()
+    return Ok()
+}
+run().await?
+"#;
     let file = temp_program("run_http_real", src);
     lang()
         .arg("run")

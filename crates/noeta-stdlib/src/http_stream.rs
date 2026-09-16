@@ -161,6 +161,16 @@ pub const SSE_SINK_CTX_METHODS: &[ExtFn] = &[
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
     },
+    // `closed() -> bool` — whether the client has gone away, mirroring `Socket.closed()`. A frame
+    // written to a departed client is dropped rather than raised (a disconnect is ordinary for an
+    // event stream), so a session that ticks on its own schedule has nothing else to read: without
+    // this it runs to the end of the process, holding its connection.
+    ExtFn {
+        param_names: &[],
+        name: "closed",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Bool),
+    },
     ExtFn {
         param_names: &[],
         name: "close",
@@ -255,6 +265,15 @@ pub fn sse_sink_ctx_method_dispatch(
                 .into());
             };
             write_wire(ctx, conn, sse_comment_wire(&text))
+        }
+        "closed" => {
+            ctx_arity(method, args, 0)?;
+            // A plain host read, like `Socket.closed()`: the host already knows the connection is
+            // gone, and asking it has nothing to await.
+            let closed = ctx.host().net_sse_is_closed(conn);
+            Ok(CtxOut::Out(NativeOut::Scalar(
+                noeta_ext_abi::registry::Scalar::Bool(closed),
+            )))
         }
         "close" => {
             ctx_arity(method, args, 0)?;
