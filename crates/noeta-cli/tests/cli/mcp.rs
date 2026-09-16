@@ -489,6 +489,19 @@ fn mcp_cancelling_a_run_stops_the_program() {
     let before = session.burn_until(mark, BURNING).rate;
 
     session.cancel(id);
+    // Stdio is processed in the order it arrives, so a reply to a request sent *after* the
+    // cancellation proves the server has read and dispatched that cancellation. The budget below
+    // then covers work the server chose to keep doing, and not the wait for it to hear: on a
+    // contended box the reader task queues for a core while the worker already holds one and goes
+    // on burning, which is delivery latency wearing the costume of work that refused to stop. It is
+    // also the first half of the session assertion — the withdrawn request left nothing on the wire,
+    // so this reply is the next id rather than a late answer to the one that was cancelled.
+    let acknowledged = session.request("tools/list", serde_json::json!({}));
+    assert_eq!(
+        acknowledged["id"].as_u64(),
+        Some(id + 1),
+        "the cancelled request must produce no reply of its own: {acknowledged}"
+    );
     // One `SAMPLE` of spinning is the ceiling. Noticing the token costs the VM one interval of its
     // per-instruction hook and the teardown that follows costs a loop counter's worth of nothing,
     // so a cancel that lands spends a small fraction of this; a run that keeps going spends all of
@@ -497,13 +510,12 @@ fn mcp_cancelling_a_run_stops_the_program() {
     let after = session.burn_rate(SAMPLE);
     assert_work_stopped("run", before, after, &stop);
 
-    // And the session is still a session: the next request is answered, and it is answered FIRST —
-    // nothing was left on the wire for the request the client withdrew.
+    // Still a session after all of it, and still answering in order.
     let next = session.request("tools/list", serde_json::json!({}));
     assert_eq!(
         next["id"].as_u64(),
-        Some(id + 1),
-        "the cancelled request must produce no reply of its own: {next}"
+        Some(id + 2),
+        "the session must go on answering after a cancelled request: {next}"
     );
 }
 
@@ -570,17 +582,31 @@ fn mcp_cancelling_an_analysis_tool_stops_the_compiler() {
     let remaining = remaining_work("pipeline", full, approach.burned);
 
     session.cancel(id);
+    // Stdio is processed in the order it arrives, so a reply to a request sent *after* the
+    // cancellation proves the server has read and dispatched that cancellation. The budget below
+    // then covers work the server chose to keep doing, and not the wait for it to hear: on a
+    // contended box the reader task queues for a core while the worker already holds one and goes
+    // on burning, which is delivery latency wearing the costume of work that refused to stop. It is
+    // also the first half of the session assertion — the withdrawn request left nothing on the wire,
+    // so this reply is the next id rather than a late answer to the one that was cancelled.
+    let acknowledged = session.request("tools/list", serde_json::json!({}));
+    assert_eq!(
+        acknowledged["id"].as_u64(),
+        Some(id + 1),
+        "the cancelled request must produce no reply of its own: {acknowledged}"
+    );
     // A quarter of what the run still had ahead of it. The abandonment lands at the next
     // declaration, and one declaration out of two thousand is a rounding error beside this.
     let stop = wait_for_stop(&session, "pipeline", remaining / SPILL);
     let after = session.burn_rate(SAMPLE);
     assert_work_stopped("pipeline", before, after, &stop);
 
+    // Still a session after all of it, and still answering in order.
     let next = session.request("tools/list", serde_json::json!({}));
     assert_eq!(
         next["id"].as_u64(),
-        Some(id + 1),
-        "the cancelled request must produce no reply of its own: {next}"
+        Some(id + 2),
+        "the session must go on answering after a cancelled request: {next}"
     );
 }
 
@@ -638,6 +664,19 @@ fn mcp_cancelling_a_project_check_stops_the_sweep() {
     let remaining = remaining_work("check", full, approach.burned);
 
     session.cancel(id);
+    // Stdio is processed in the order it arrives, so a reply to a request sent *after* the
+    // cancellation proves the server has read and dispatched that cancellation. The budget below
+    // then covers work the server chose to keep doing, and not the wait for it to hear: on a
+    // contended box the reader task queues for a core while the worker already holds one and goes
+    // on burning, which is delivery latency wearing the costume of work that refused to stop. It is
+    // also the first half of the session assertion — the withdrawn request left nothing on the wire,
+    // so this reply is the next id rather than a late answer to the one that was cancelled.
+    let acknowledged = session.request("tools/list", serde_json::json!({}));
+    assert_eq!(
+        acknowledged["id"].as_u64(),
+        Some(id + 1),
+        "the cancelled request must produce no reply of its own: {acknowledged}"
+    );
     // A pool is the coarsest thing the sweep does without looking at the token, and there are a
     // dozen of them, so what is still in flight when the cancel lands is a small share of what the
     // sweep had left.
@@ -645,11 +684,12 @@ fn mcp_cancelling_a_project_check_stops_the_sweep() {
     let after = session.burn_rate(SAMPLE);
     assert_work_stopped("check", before, after, &stop);
 
+    // Still a session after all of it, and still answering in order.
     let next = session.request("tools/list", serde_json::json!({}));
     assert_eq!(
         next["id"].as_u64(),
-        Some(id + 1),
-        "the cancelled request must produce no reply of its own: {next}"
+        Some(id + 2),
+        "the session must go on answering after a cancelled request: {next}"
     );
 }
 
