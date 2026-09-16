@@ -186,6 +186,28 @@ pub struct StallRegistry {
 /// The one process-wide stall registry (see [`StallRegistry`]).
 pub static STALL: StallRegistry = StallRegistry::new();
 
+/// Dev-only **spawn-window delay** (`NOETA_ISOLATE_SPAWN_DELAY_MS`, read once per process): how long
+/// the parent thread pauses immediately after starting an isolate worker's thread, before finishing
+/// the rest of its own spawn bookkeeping.
+///
+/// A worker's thread is live from before the parent's next instruction, so everything the parent
+/// still owes that worker — its [`STALL`] slot above all — is owed across a window the OS scheduler
+/// can stretch to milliseconds on a loaded machine. That is a race to reproduce and a certainty to
+/// assert, so this knob puts the parent in the window on demand and a test reads the registry's
+/// accounting there without racing for it. Unset (the default) costs one cached load per real spawn.
+pub fn spawn_window_delay() {
+    static DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY_MS.get_or_init(|| {
+        std::env::var("NOETA_ISOLATE_SPAWN_DELAY_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 /// An RAII registration of one parallel scheduler in the [`STALL`] registry: increments `active` on
 /// creation, decrements it on drop (so an unwinding abort de-registers cleanly).
 pub struct SchedulerGuard {

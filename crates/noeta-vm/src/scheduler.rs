@@ -1068,6 +1068,10 @@ impl<'m> Vm<'m> {
             // so it harvests immediately instead of sleeping out its stall quantum.
             isolate::WAKE.notify();
         });
+        // The worker's thread is live from here, and everything below is bookkeeping the parent still
+        // owes it. Dev-only knob, no-op unless `NOETA_ISOLATE_SPAWN_DELAY_MS` is set: hold the parent
+        // here so a test can observe the window a loaded machine reaches on its own.
+        isolate::spawn_window_delay();
         let id = self.isolates.isolates.len() as u32;
         self.isolates.isolates.push(IsolateSlot {
             result: rx,
