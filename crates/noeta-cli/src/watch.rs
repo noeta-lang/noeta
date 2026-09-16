@@ -403,6 +403,23 @@ fn relevant_path(path: &Path, reads: &[PathBuf]) -> bool {
 /// `front` is the **boot's own resolved dependency graph** (audit-10), handed over for the same
 /// reason `applied` is: a re-link must link against the graph the running program was built with.
 /// This used to re-resolve from scratch on every edit — see [`relink_entry_unit`].
+/// How long the caller waits for the watcher thread to register before giving up on it.
+///
+/// Registering an inotify watch is a syscall, so this is only ever reached if the thread cannot be
+/// scheduled at all. It is a bound on a hang, not a budget anything is expected to use.
+const ARM_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Arm the hot watcher and **return only once it is actually watching**.
+///
+/// Spawning the thread is not arming it. The thread registers its watch as its very first act, but
+/// `std::thread::spawn` returns before that thread has necessarily run at all, and the caller's next
+/// steps are to compile and bind. For a small program on a loaded box those finish first, so the
+/// server announces `listening … hot-reloading` while nothing is subscribed — and `notify` has no
+/// backlog for a watch that did not exist, so an edit in that window raises no event, produces no
+/// diagnostic, and is never retried.
+///
+/// So the caller blocks here until the watch is registered. That makes "the watcher is armed before
+/// anything compiles" true as stated rather than true in call order.
 pub(crate) fn spawn_hot_watcher(
     entry: std::path::PathBuf,
     tail: Vec<noeta_ast::Stmt>,
@@ -411,7 +428,14 @@ pub(crate) fn spawn_hot_watcher(
     mailbox: noeta_vm::HotSwapMailbox,
     wake: std::sync::Arc<noeta_host_real::Notify>,
 ) {
-    std::thread::spawn(move || hot_watcher(entry, tail, applied, front, mailbox, wake));
+    let (armed_tx, armed_rx) = mpsc::sync_channel::<()>(1);
+    std::thread::spawn(move || hot_watcher(entry, tail, applied, front, mailbox, wake, armed_tx));
+    if armed_rx.recv_timeout(ARM_BUDGET).is_err() {
+        eprintln!(
+            "[hot] the file watcher did not start within {}s — edits may not reload",
+            ARM_BUDGET.as_secs()
+        );
+    }
 }
 
 fn hot_watcher(
@@ -421,6 +445,7 @@ fn hot_watcher(
     front: std::sync::Arc<noeta_runner::compile::FrontFacts>,
     mailbox: noeta_vm::HotSwapMailbox,
     wake: std::sync::Arc<noeta_host_real::Notify>,
+    armed: mpsc::SyncSender<()>,
 ) {
     let entry_canon = entry.canonicalize().unwrap_or_else(|_| entry.clone());
     // ARM THE WATCH FIRST. Everything else here — reading spec reads, and once upon a time
@@ -431,6 +456,10 @@ fn hot_watcher(
     let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let Ok(mut watcher) = notify::recommended_watcher(tx) else {
         eprintln!("[hot] cannot start the file watcher — edits will not reload");
+        // Release the caller: it is waiting to learn that this thread is watching, and there will
+        // be no watch. Leaving it to time out would stall the boot by the whole arm budget for a
+        // failure already reported.
+        let _ = armed.send(());
         return;
     };
     let root = std::env::current_dir().unwrap_or_else(|_| ".".into());
@@ -449,6 +478,10 @@ fn hot_watcher(
             );
         }
     }
+    // Watching now. The boot has been blocked on this since before it compiled, so nothing has
+    // announced a listening server yet and no edit can have fallen into an unwatched window.
+    // Everything below is setup that `notify` will queue events behind.
+    let _ = armed.send(());
     // Files an expansion hook read (an `@openapi` spec). A change to one is never entry-swappable —
     // it regenerates members — so it must reach the `all_entry` check below and force a restart,
     // which means passing the event filter first. Computed once: the hot process is restarted
@@ -462,6 +495,10 @@ fn hot_watcher(
         if !relevant(&event, &reads) {
             continue;
         }
+        // When this edit burst was first seen. Everything between here and the deposit below is
+        // the watcher's own work — debounce, re-link, check, diff, compile — and none of it is the
+        // broadcast. Reported on the deposit line so the two are separable.
+        let seen_at = std::time::Instant::now();
         let mut paths: Vec<std::path::PathBuf> = match &event {
             Ok(e) => e.paths.clone(),
             Err(_) => Vec::new(),
@@ -542,6 +579,17 @@ fn hot_watcher(
                     sites: Some(std::sync::Arc::new(sites)),
                 });
                 applied = new_unit;
+                // The success counterpart to `[hot] check failed`. A green reload used to be
+                // silent, which left `--watch` unable to say whether a swap had been built yet —
+                // and left anything waiting on one unable to tell "the compiler is still working"
+                // apart from "a worker missed the broadcast". The generation is the plan's index in
+                // the broadcast queue, so consecutive edits are visibly distinct; the duration is
+                // the watcher's own work, ending here, with the broadcast still ahead of it.
+                eprintln!(
+                    "[hot] swapped generation {} in {} ms",
+                    mailbox.deposited().saturating_sub(1),
+                    seen_at.elapsed().as_millis()
+                );
                 // A green deposit supersedes any pending red-check overlay, and the wake rouses
                 // every (possibly idle) worker to apply it now rather than at its next request.
                 if let Ok(mut err) = mailbox.error.lock() {
