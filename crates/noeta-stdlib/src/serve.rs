@@ -471,16 +471,23 @@ enum Stop {
     Exit(i32),
 }
 
-/// Classify an abort the serve loop is about to recover from, reporting a plain failure on the way
-/// (an `os.exit` records no diagnostic, so there is nothing to drain for that one).
+/// Classify an abort the serve loop is about to recover from, reporting a plain failure on the way.
+///
+/// The **diagnostics decide**, and the exit latch only breaks the tie. An `os.exit` records no
+/// diagnostic, so anything drained here belongs to a genuine failure. Reading the latch first would
+/// be wrong from the moment a drain begins: the latch stays set for the rest of the run, so a
+/// handler that aborts *during* the drain would be read as a second exit and its diagnostic thrown
+/// away with nothing printed, which is the silence this whole path exists to end.
 fn classify_stop(ctx: &mut dyn NativeCtx, what: &str) -> Stop {
-    match ctx.exit_requested() {
-        Some(code) => Stop::Exit(code),
-        None => {
-            report_abort(ctx, what);
-            Stop::Failed
-        }
+    let requested = ctx.exit_requested();
+    let diagnostics = ctx.drain_runtime_diagnostics();
+    if diagnostics.is_empty()
+        && let Some(code) = requested
+    {
+        return Stop::Exit(code);
     }
+    report_abort(ctx, what, diagnostics);
+    Stop::Failed
 }
 
 /// Begin the program-initiated drain: stop accepting, cancel the pending accept so the loop is not
@@ -517,10 +524,11 @@ fn begin_exit(
 /// `serve` deliberately recovers from `CtxError::Abort` (a handler's abort becomes a 500, a
 /// websocket session's closes its stream). The diagnostic is recorded backend-side, but a serve
 /// loop runs until Ctrl-C and so never reaches the program end that would print it — without this,
-/// a developer sees a bare 500 or a silently reconnecting socket and nothing else. Draining also
-/// keeps the backend's diagnostic buffer from growing for the life of the process.
-fn report_abort(ctx: &mut dyn NativeCtx, what: &str) {
-    for diagnostic in ctx.drain_runtime_diagnostics() {
+/// a developer sees a bare 500 or a silently reconnecting socket and nothing else. The draining
+/// itself happens in [`classify_stop`], which needs the diagnostics to decide what the abort was;
+/// it also keeps the backend's diagnostic buffer from growing for the life of the process.
+fn report_abort(ctx: &mut dyn NativeCtx, what: &str, diagnostics: Vec<String>) {
+    for diagnostic in diagnostics {
         ctx.write_stderr(&format!("noeta serve: {what} failed: {diagnostic}\n"));
     }
 }

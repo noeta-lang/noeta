@@ -1,0 +1,39 @@
+// A handler that fails WHILE the drain is running is still a failure, and is still named.
+//
+// The exit latch is set for the rest of the run once any handler calls `os.exit`, so it cannot be
+// what tells an exit from a diagnostic after that moment. The drained diagnostics decide instead:
+// an `os.exit` records none, and anything recorded belongs to a genuine abort. Reading the latch
+// first would answer this request 503 and throw its diagnostic away with nothing printed.
+//
+// `/` is slow and async, so it is still in flight when `/health` exits. It then aborts on its own
+// during the drain: 500 to that client, the abort named on stderr, and the run still ends with the
+// code the exiting handler asked for.
+// expect: stdout "start GET /"
+// expect: stdout "exiting on GET /health"
+// expect: stderr "noeta serve: os.exit(9) in a handler — finishing in-flight requests, then exiting"
+// expect: stderr "noeta serve: request handler failed: [E0016] index 99 out of bounds for list of length 3"
+// expect: exit 9
+use std.http.server
+use std.http.{Request, Response}
+use std.task.{sleep}
+use std.{os}
+
+async fn handle(req: Request): Response {
+    path = req.path()
+    if path == "/" {
+        echo "start ${req.method()} ${path}"
+        sleep(50).await
+        xs: List<int> = [1, 2, 3]
+        boom = xs[99]
+        return server.response(200, "unreachable ${boom}")
+    }
+    if path == "/health" {
+        echo "exiting on ${req.method()} ${path}"
+        os.exit(9)
+    }
+    echo "never handled ${path}"
+    return server.response(200, "ok")
+}
+
+server.serve(8080, handle)
+echo "unreachable"
