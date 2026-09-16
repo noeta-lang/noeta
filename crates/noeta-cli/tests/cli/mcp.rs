@@ -342,13 +342,13 @@ fn mcp_cancelling_a_run_stops_the_program() {
     );
 }
 
-/// A single module big enough that checking it takes seconds — the shape that makes "abandoned
-/// part way through" a measurable claim rather than a hopeful one.
+/// A single module big enough that its front end takes seconds — the size that makes "abandoned
+/// part way through" measurable.
 fn oversized_module(name: &str) -> PathBuf {
     let dir = temp_root().join(format!("noeta_cli_test_{name}"));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let mut text = String::new();
-    for i in 0..3_000 {
+    for i in 0..2_000 {
         text.push_str(&format!(
             "fn f{i}(a: int, b: int): int {{\n  c = a + b + {i}\n  d = c * 2\n  return d - a\n}}\n"
         ));
@@ -367,25 +367,27 @@ fn mcp_cancelling_an_analysis_tool_stops_the_compiler() {
     let file = oversized_module("mcp_cancel_pipeline");
     let mut session = Session::start();
 
-    // Calibrate rather than guess. `ast` is lex + parse + render, so it costs more than the parse
-    // `pipeline` must finish before it reaches the checker, and far less than the check itself.
-    // Waiting that long puts the cancel inside the checker on a fast machine and on a loaded one
-    // alike, because both halves of the comparison move together.
-    let parsing = std::time::Instant::now();
-    session.call_tool("ast", &file);
-    let parsing = parsing.elapsed();
+    // What the whole tool costs, measured rather than assumed. Everything below is a fraction of
+    // it, so the test says the same thing on a fast machine and a loaded one — and, more to the
+    // point, so the deadline stays well under the work. A wait generous enough for the compile to
+    // simply *finish* inside it would pass against a server that ignores cancellation entirely.
+    let full = std::time::Instant::now();
+    session.call_tool("pipeline", &file);
+    let full = full.elapsed();
 
     let id = session.send_request(
         "tools/call",
         serde_json::json!({ "name": "pipeline", "arguments": { "file": file } }),
     );
-    std::thread::sleep(parsing);
+    // A quarter of the way in: past the lex and parse, which carry no cancellation poll, and well
+    // inside the checker, which polls at every declaration.
+    std::thread::sleep(full / 4);
     let before = session.burn_rate(SAMPLE);
 
     session.cancel(id);
-    // The abandonment lands at the checker's next per-declaration poll, so the wait scales with the
-    // spans that carry none: lexing, parsing, and the checker's whole-program pre-passes.
-    wait_for_stop(&session, "pipeline", parsing * 8);
+    // A third of the tool's cost. The abandonment needs one more poll-free span to land in; the
+    // check and the compile still ahead of the cancel point are several times that.
+    wait_for_stop(&session, "pipeline", full / 3);
     let after = session.burn_rate(SAMPLE);
     assert_work_stopped("pipeline", before, after);
 
@@ -404,7 +406,7 @@ fn many_modules(name: &str, count: usize) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("create temp dir");
     for file in 0..count {
         let mut text = String::new();
-        for i in 0..300 {
+        for i in 0..400 {
             text.push_str(&format!(
                 "fn m{file}_f{i}(a: int): int {{\n  b = a + {i}\n  return b * 2\n}}\n"
             ));
@@ -418,19 +420,27 @@ fn many_modules(name: &str, count: usize) -> PathBuf {
 fn mcp_cancelling_a_project_check_stops_the_sweep() {
     // `check` over a directory is a sweep of independent entries. Cancelling it abandons the sweep:
     // the entry in flight finishes and the next never starts.
-    let dir = many_modules("mcp_cancel_check", 12);
+    let dir = many_modules("mcp_cancel_check", 24);
     let mut session = Session::start();
+
+    // The whole sweep, measured, so the cancel lands inside it and the deadline stays under it. A
+    // deadline long enough for the sweep to simply finish would pass against a server that never
+    // looks at the cancellation at all.
+    let full = std::time::Instant::now();
+    session.call_tool("check", &dir);
+    let full = full.elapsed();
+
     let id = session.send_request(
         "tools/call",
         serde_json::json!({ "name": "check", "arguments": { "file": dir } }),
     );
-
-    std::thread::sleep(Duration::from_millis(700));
+    std::thread::sleep(full / 4);
     let before = session.burn_rate(SAMPLE);
 
     session.cancel(id);
-    // One entry is the granularity: the entry in flight finishes before the sweep stops.
-    wait_for_stop(&session, "check", Duration::from_secs(20));
+    // One entry is the granularity, and there are two dozen of them, so a third of the sweep is
+    // ample for the entry in flight to finish and far short of the entries that would follow.
+    wait_for_stop(&session, "check", full / 3);
     let after = session.burn_rate(SAMPLE);
     assert_work_stopped("check", before, after);
 
