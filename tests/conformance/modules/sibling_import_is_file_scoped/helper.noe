@@ -1,0 +1,6 @@
+// A neighbouring script that imports `std.io` for its own use. It declares no `namespace`, so it is
+// not a module of anything: nothing can `use` it, nothing merges from it, and — the property
+// main.noe measures — its import binds no name outside this file.
+use std.io
+
+io.errln("the helper's own line")

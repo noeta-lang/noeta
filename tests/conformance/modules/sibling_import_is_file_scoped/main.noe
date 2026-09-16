@@ -1,0 +1,12 @@
+// A `use` binds in the file that writes it. This directory has no manifest, so neither file derives
+// a module path and neither declares a `namespace` — helper.noe is a script that happens to sit
+// next door, not a module of this program. Its `use std.io` must therefore leave `io` unbound here.
+//
+// The linker admits a pooled file as an import **driver** on the same condition it admits it as a
+// resolution candidate: it declares a namespace. Without that filter a namespace-less neighbour got
+// no alias table, so its retained `use std.io` kept the bare name `io` and was prepended to the
+// merged program — into the flat top-level scope these statements run in. `noeta check` then
+// reported this file clean while `noeta run` refused it.
+// expect: error E0005 at 12:1
+// expect: exit 1
+io.errln("victim")
