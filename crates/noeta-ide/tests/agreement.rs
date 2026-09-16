@@ -92,8 +92,20 @@ fn both_surfaces_for(app: &Path, entry: &Path, target: Option<&str>) -> (Vec<Str
         noeta_pm::sources::package_root(entry).as_ref(),
     )
     .expect("the fixture's files are readable");
+    // **A linked program is not yet a checked one**, and the salsa side above is checked. Reading
+    // only the link's own diagnostics made this helper blind to every fault the *checker* raises —
+    // it could compare an E0019 or an E0073 and nothing else, so a surface that resolved a name
+    // the other leaves unbound (E0005) looked like agreement. `noeta run` links and then checks,
+    // under the provenance the loader resolved, so that is what the loader half does.
     let mut loader: Vec<String> = match linked {
-        Ok(_) => Vec::new(),
+        Ok(linked) => noeta_check::check_all_with(
+            &linked.program,
+            noeta_check::CheckOptions::for_workspace(linked.provenance.clone()),
+        )
+        .diagnostics
+        .iter()
+        .map(|d| d.code.code().to_string())
+        .collect(),
         Err(ds) => ds
             .iter()
             .map(|d| d.diagnostic.code.code().to_string())
@@ -693,6 +705,125 @@ fn a_migration_does_not_link_against_the_package_on_either_surface() {
         salsa, loader,
         "`noeta check` reports a clean tree that `noeta run` refuses: check says {salsa:?}, the \
          loader says {loader:?}"
+    );
+    drop(root);
+}
+
+/// **A sibling's `use` bound a name in a file that never wrote it.**
+///
+/// Two lone scripts share a directory with no manifest. `sibling.noe` writes `use std.io`;
+/// `victim.noe` writes `io.errln(…)` and imports nothing. Neither declares a `namespace`, so
+/// neither is a module of the other — a namespace-less file is in no `module_views`, resolves
+/// nothing and merges nothing.
+///
+/// It was still an import **driver**. `link_core` filtered the resolution pool on
+/// `module_namespace` and did not filter the driver list, and a namespace-less driver gets no
+/// α-rename table, so its retained `use std.io` kept the bare name `io` and was prepended to the
+/// merged program — into the flat top-level scope the entry's own statements run in. The batch
+/// loader never met the fault because `sibling_is_inert` defers parsing such a file, so the rule
+/// held on the executing front end and not on the checking one.
+///
+/// This is `noeta check` exiting 0 on a file `noeta run` refuses, which is the direction that
+/// matters: the CLI, the MCP `check` tool and both of the editor's paths all reach this link.
+#[test]
+fn a_namespaceless_siblings_import_does_not_bind_in_the_entry() {
+    seed();
+    let root = noeta_test_temp::TempDir::new("agreement-sibling-import");
+    let dir = root.join("scripts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("sibling.noe"),
+        "use std.io\nio.errln(\"sibling\")\n",
+    )
+    .unwrap();
+    let entry = dir.join("victim.noe");
+    std::fs::write(&entry, "io.errln(\"victim\")\n").unwrap();
+
+    // Non-vacuity: the sibling really is in the entry's pool, which is the whole precondition — a
+    // fixture whose sibling was never read would pass this test by accident.
+    let pool: Vec<String> = noeta_loader::read_dir_modules(&dir)
+        .into_iter()
+        .map(|m| m.name)
+        .collect();
+    assert!(
+        pool.iter().any(|n| n.ends_with("sibling.noe")),
+        "the flat scan must yield the sibling, or this fixture tests nothing: {pool:?}"
+    );
+
+    // `noeta check victim.noe` is a check of the *file*, over the pool its directory forms.
+    let (salsa, loader) = both_surfaces(&entry, &entry);
+    assert!(
+        loader.contains(&"E0005".to_string()),
+        "the loader must really refuse the unimported name, or the assertion below is vacuous: \
+         {loader:?}"
+    );
+    assert_eq!(
+        salsa, loader,
+        "`noeta check` reports a clean file that `noeta run` refuses: check says {salsa:?}, the \
+         loader says {loader:?}"
+    );
+    drop(root);
+}
+
+/// **The same seam in the other direction: a sibling's broken `use` was reported against the entry.**
+///
+/// `sibling.noe` writes `use zzz.nope`, which names no module. Driving that `use` from the entry's
+/// link raised E0019 while checking a file that never wrote the import — `noeta check victim.noe`
+/// failing a program `noeta run victim.noe` executes.
+///
+/// The two surfaces agreeing is a claim in both directions, and this is the half a repair aimed only
+/// at the quiet direction would leave live.
+#[test]
+fn a_namespaceless_siblings_broken_import_is_not_the_entrys_fault() {
+    seed();
+    let root = noeta_test_temp::TempDir::new("agreement-sibling-broken-import");
+    let dir = root.join("scripts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("sibling.noe"), "use zzz.nope\n").unwrap();
+    let entry = dir.join("victim.noe");
+    std::fs::write(&entry, "echo 1;\n").unwrap();
+
+    let (salsa, loader) = both_surfaces(&entry, &entry);
+    assert!(
+        loader.is_empty(),
+        "the loader must accept this entry, or the assertion below proves nothing: {loader:?}"
+    );
+    assert_eq!(
+        salsa, loader,
+        "`noeta check` refuses a file `noeta run` executes, over an import in someone else's \
+         file: check says {salsa:?}, the loader says {loader:?}"
+    );
+    drop(root);
+}
+
+/// **The control: a neighbour that declares a `namespace` is a module, and stays one.**
+///
+/// A file in a manifest-less directory earns an identity by declaring `namespace`, and a sibling
+/// may then `use` it. Filtering the driver list must not reach this case — ending the disagreement
+/// by cutting every file off from its neighbours would delete a feature and do it quietly.
+#[test]
+fn a_namespaced_sibling_is_still_a_module_on_both_surfaces() {
+    seed();
+    let root = noeta_test_temp::TempDir::new("agreement-sibling-namespaced");
+    let dir = root.join("scripts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("helper.noe"),
+        "namespace Helper\nuse std.io\npub fn twice(n: int): int { return n * 2 }\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.noe");
+    std::fs::write(&entry, "use Helper.twice\necho twice(21);\n").unwrap();
+
+    let (salsa, loader) = both_surfaces(&entry, &entry);
+    assert_eq!(
+        salsa, loader,
+        "the surfaces disagree about a namespaced neighbour: check says {salsa:?}, the loader \
+         says {loader:?}"
+    );
+    assert!(
+        salsa.is_empty(),
+        "`use Helper.twice` resolves to the neighbour that declares that namespace: {salsa:?}"
     );
     drop(root);
 }

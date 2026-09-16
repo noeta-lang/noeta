@@ -654,9 +654,15 @@ pub fn read_dir_modules(dir: &Path) -> Vec<RawModule> {
 /// A sibling with **no derived module path** ([`ModulePath::Declared`] — the flat, no-package scan a
 /// lone script gets) has exactly one way to acquire an identity: its own `namespace` declaration.
 /// `apply_derived_paths` leaves such a file alone, and [`link_core`] admits a module into the
-/// resolution pool only if [`module_namespace`] answers — so a flat-scan sibling that declares no
-/// `namespace` is in no pool, no `import_targets` list, no `project_roots` set, and no module map.
-/// It cannot be resolved, cannot be merged, and cannot be suggested. Parsing it decides nothing.
+/// resolution pool **and into the driver list** only if [`module_namespace`] answers — so a
+/// flat-scan sibling that declares no `namespace` is in no pool, no `import_targets` list, no
+/// `project_roots` set, no module map, and drives no import. It cannot be resolved, cannot be
+/// merged, cannot be suggested, and cannot bind a name. Parsing it decides nothing.
+///
+/// This deferral is therefore a speed shortcut over a file the linker discards anyway, never the
+/// thing that makes discarding it happen. The distinction is load-bearing: the salsa surface
+/// (`noeta check`, the LSP) parses every member eagerly and has no deferral at all, so a rule this
+/// function *enforced* would be a rule that holds on one front end only.
 ///
 /// The one thing its parse *could* still produce is a [`BrokenModule`], which names the file as a
 /// hint on someone else's unresolved `use`. That is an error-path fact, so it is recovered on the
@@ -2189,6 +2195,29 @@ fn link_core(
     // is already global-registry-coupled (verbatim-tier names below), so the process default —
     // seeded by the assembling driver — is the lens.
     let reg = noeta_ext_abi::registry::single_registry_process();
+    // **Driving is admission, and it is the same admission.** A module joins the driver list on the
+    // same condition it joins `module_views` below: it declares a namespace. A namespace-less module
+    // gets no α-rename table (`handles` in the driver loop), so its retained `use` keeps its bare
+    // local name and lands in the merged program's flat top-level scope — which is the *entry's*
+    // scope. A lone script beside `sibling.noe` containing `use std.io` therefore resolved `io`
+    // inside a file that imports nothing, and a `use zzz.nope` in that same sibling was reported
+    // against an entry that never wrote it.
+    //
+    // The rule was already relied upon and spelled somewhere else: `sibling_is_inert` defers parsing
+    // such a file entirely, which is why `noeta run` never saw either fault. That deferral is a
+    // performance shortcut over a file the linker has no use for, so its claim ("parsing it decides
+    // nothing") has to be true of the linker rather than enforced by never handing it the file. The
+    // salsa surface (`noeta check`, the LSP, the MCP `check` tool) parses every member eagerly and
+    // handed it over, so the two front ends disagreed in both directions.
+    //
+    // A module of a *package* derives its path into a `namespace` declaration before linking, and a
+    // dependency module is re-rooted into one, so both keep driving exactly as they did.
+    let drivers: Vec<&Program> = drivers
+        .iter()
+        .copied()
+        .filter(|program| module_namespace(program).is_some())
+        .collect();
+    let drivers: &[&Program] = &drivers;
     // A module contributes only if it declares a namespace to resolve against.
     // The **entry** is a resolution candidate alongside the pool: it declares a namespace like any
     // other module, and a sibling may legitimately `use` it (two files of one project importing each
