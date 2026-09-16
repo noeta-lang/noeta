@@ -536,6 +536,12 @@ const SSE_SINK_DOCS: &[(&str, &str)] = &[
          dispatching an event, so an idle stream is not reaped by an intermediary.",
     ),
     (
+        "closed",
+        "Whether the client has gone away. A frame pushed to a departed client is dropped rather than \
+         raised, so a session that sends on its own schedule checks this to know when to stop — \
+         `while !sink.closed() { … }`. The `Socket.closed()` of the push side.",
+    ),
+    (
         "close",
         "End the event stream and release the connection. The stream also closes when the handler returns, \
          so this is for ending early.",
@@ -5354,6 +5360,12 @@ const IO_DOCS: &[(&str, &str)] = &[
     (
         "errln",
         "Write a value's display form to standard error, followed by a newline.",
+    ),
+    (
+        "flush",
+        "Push everything written to standard output and standard error so far to the terminal, \
+         whole line or not. A running program streams completed lines, so a partial one waits for \
+         the newline that ends it — call this to send a prompt or a progress indicator now.",
     ),
     (
         "stdin_line",

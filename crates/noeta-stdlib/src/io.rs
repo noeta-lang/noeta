@@ -6,6 +6,12 @@
 //! - `out(x)` / `outln(x)` → the stdout buffer (the same buffer the `echo` keyword writes to);
 //! - `err(x)` / `errln(x)` → the stderr buffer.
 //!
+//! `flush()` joins them as the fifth ctx function. A live host drains **completed lines**, so a
+//! partial one sits in the buffer until something terminates it; `flush()` pushes it now, which is
+//! what a prompt without a newline and a non-line-oriented wire format both need. It routes through
+//! [`NativeCtx::flush_output`], whose take-then-restore leaves a batch host's buffers byte-identical,
+//! so the two backends agree on it the same way they agree on the writers.
+//!
 //! The `*ln` variants append a trailing newline; the bare ones write raw. They reach the buffers
 //! through [`NativeCtx::write_stdout`] / [`NativeCtx::write_stderr`] — the seam that lets an ordinary
 //! native touch the compared output without a lowerer intrinsic or bytecode change.
@@ -50,6 +56,13 @@ pub const IO_CTX_FNS: &[ExtFn] = &[
         params: &[SigType::Dyn],
         ret: RetTy::Concrete(SigType::Unit),
     },
+    // `flush()` — push what has been written so far to a streaming host, whole line or not.
+    ExtFn {
+        param_names: &[],
+        name: "flush",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
 ];
 
 /// `std.io` ctx dispatch. Generic over the concrete ctx (`C: NativeCtx + ?Sized`) so a compiled-in
@@ -59,6 +72,13 @@ pub fn io_ctx_dispatch<C: NativeCtx + ?Sized>(
     ctx: &mut C,
     args: &[Slot],
 ) -> Result<CtxOut, CtxError> {
+    // `flush` takes no argument and renders nothing, so it is resolved before the arity check the
+    // four writers share.
+    if func == "flush" {
+        ctx_arity(func, args, 0)?;
+        ctx.flush_output();
+        return Ok(CtxOut::Out(NativeOut::Unit));
+    }
     ctx_arity(func, args, 1)?;
     // Render through the backend's own display path (echo-identical, `to_string`-aware).
     let text = ctx.render(args[0])?;

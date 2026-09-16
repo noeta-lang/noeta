@@ -1,0 +1,57 @@
+// `SseSink.closed()` — whether the client is still there, and the push side's answer to
+// `Socket.closed()`.
+//
+// An event stream has no read side, so a departed client cannot surface as a `none` from a recv
+// the way a websocket's does, and a frame written to one that has gone is dropped rather than
+// raised (a disconnect is ordinary for an event stream). A session that sends on its own schedule
+// therefore has nothing else to ask, and without this door it keeps pushing into a closed socket
+// until the process ends, holding the connection all the while.
+//
+// The sandbox scripts the departure the way it scripts a websocket conversation: its client stays
+// for `SANDBOX_SSE_CLIENT_WRITES` writes and then leaves, counting the session's own writes, so
+// both backends reach the departure at the same frame and the loop below terminates in-oracle.
+// expect: stdout "GET /"
+// expect: stdout "GET /health"
+// expect: stdout "POST /echo"
+// expect: stdout "GET /users/42"
+// expect: stdout "DELETE /users/42"
+// expect: stdout "POST /form"
+// expect: stdout "GET /ws"
+// expect: stdout "open: false"
+// expect: stdout "client left after 3 frames"
+// expect: stdout "served"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response, SseSink, Frame}
+
+async fn events(sink: SseSink): bool {
+    // A fresh stream has a client on the other end.
+    echo "open: ${sink.closed()}"
+
+    // The shape a ticking session wants: push until the client is gone, then return and let the
+    // connection go. The loop is bounded by the client's departure and by nothing else.
+    mut sent = 0
+    while !sink.closed() {
+        sink.send(Frame { event: "tick", data: "${sent}", id: "", retry: none })
+        sent = sent + 1
+    }
+    echo "client left after ${sent} frames"
+
+    // Still closed once the client has gone: the answer is a state, not an event that is consumed
+    // by reading it.
+    if !sink.closed() {
+        echo "closed() went back to false"
+    }
+    return true
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/events" {
+        return server.sse(events)
+    }
+    echo "${req.method()} ${req.path()}"
+    return server.response(200, "ok")
+}
+
+server.serve(8080, fetch)
+echo "served"

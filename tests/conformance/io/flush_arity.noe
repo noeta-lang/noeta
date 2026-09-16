@@ -1,0 +1,13 @@
+// `io.flush()` is nullary, and the checker arity-gates it like every other native. `io.flush(1)`
+// hands an argument to a 0-parameter function, so the program is rejected before either backend
+// runs rather than aborting once it reaches the call.
+//
+// The four writers in the same module each take exactly one value, so `flush` is the one place in
+// `std.io` where the ctx dispatch resolves a name before the arity check the others share — which
+// is the mistake this case is here to catch.
+// expect: error E0007 at 12:1
+// expect: exit 1
+use std.io
+
+io.flush(1)
+echo "unreachable"

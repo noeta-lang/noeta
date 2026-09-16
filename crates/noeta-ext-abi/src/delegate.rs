@@ -399,6 +399,11 @@ macro_rules! __delegate_host_capability {
             fn net_sse_close(&self, conn: u64) -> Box<dyn $crate::ExternIo> {
                 self.$field.net_sse_close(conn)
             }
+            // The `net_ws_is_closed` twin, forwarded for the same reason: the trait default is
+            // `true`, so an omission here would report every live event stream as already gone.
+            fn net_sse_is_closed(&self, conn: u64) -> bool {
+                self.$field.net_sse_is_closed(conn)
+            }
         }
     };
     ($ty:ty, $field:ident, P2pProvider) => {

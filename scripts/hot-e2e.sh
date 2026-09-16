@@ -61,7 +61,9 @@ SUITES=(
                         # failure, not just `exit status: 1`
     "parallel_serve:2"  # `--parallel 4`: shared listener, concurrent slow requests, SIGINT drains all;
                         # plus the worker run tail — an aborting worker renders its diagnostic AND its stack
-    "live_stream:3"     # SSE both directions, including a body split mid-frame and mid-CRLF
+    "live_stream:4"     # SSE both directions, including a body split mid-frame and mid-CRLF; plus
+                        # the abandoned stream — a session must see `sink.closed()` go true when its
+                        # client leaves, instead of pushing its whole budget into a dead socket
     "impact_watch:2"    # `noeta test --watch` impact filtering, single-file and across modules
 )
 

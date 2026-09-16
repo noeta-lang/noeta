@@ -412,6 +412,17 @@ pub trait Network {
     fn net_sse_close(&self, conn: u64) -> Box<dyn crate::ExternIo> {
         Box::new(crate::stream::SseCloseIo { conn })
     }
+
+    /// Whether `conn`'s client has gone away — the push-side twin of
+    /// [`Self::net_ws_is_closed`], and the only way a session learns it is talking to nobody.
+    ///
+    /// An event stream has no read side, so a departed client cannot surface as a `None` from a
+    /// recv the way a websocket's does, and a write to a dead connection is ordinary rather than an
+    /// error ([`Self::net_sse_send_now`] drops the frame). Without this a session that ticks on its
+    /// own schedule runs until the process ends, holding its connection the whole time.
+    fn net_sse_is_closed(&self, _conn: u64) -> bool {
+        true
+    }
 }
 
 /// **Host introspection** capability. `env_keys` is sorted. The sandbox presents a fixed

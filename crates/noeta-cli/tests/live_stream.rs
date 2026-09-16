@@ -343,3 +343,126 @@ run().await?
         "the real host must report the streamed response head (stderr: {stderr})"
     );
 }
+
+/// A session learns its client is gone and stops, instead of pushing into a socket nobody holds.
+///
+/// The handler below is scripted for far more ticks than the test waits for, and the client leaves
+/// after the first couple of frames. What the session does next is the whole assertion: with
+/// `sink.closed()` answering, it ends within a tick or two of the departure and its connection is
+/// released; without it, `sink.send` keeps succeeding silently and the handler runs its entire
+/// budget with nobody on the other end, holding the connection for the life of the process.
+///
+/// The tick it stops at is what is asserted, rather than elapsed time: detection costs one write,
+/// so the number does not grow when the machine is busy.
+#[test]
+#[ignore = "spawns the CLI and binds a real socket; run explicitly"]
+fn a_session_stops_when_its_client_goes_away() {
+    /// Ticks the handler is willing to send, far past where the client leaves.
+    const BUDGET: u32 = 40;
+    /// How late the session may notice. One write is what detection costs; the slack is for a
+    /// frame already in flight when the client left.
+    const SLACK: u32 = 10;
+
+    let dir = scratch("abandoned");
+    let program = dir.join("abandoned.noe");
+    std::fs::write(
+        &program,
+        format!(
+            r#"use std.http.server
+use std.http.{{Request, Response, SseSink, Frame}}
+use std.task.{{sleep}}
+
+async fn events(sink: SseSink): bool {{
+    mut i = 0
+    while i < {BUDGET} {{
+        if sink.closed() {{
+            echo "session ended at tick ${{i}}"
+            return true
+        }}
+        sink.send(Frame {{ event: "tick", data: "${{i}}", id: "", retry: none }})
+        sleep(200).await
+        i = i + 1
+    }}
+    echo "session ran its whole budget"
+    return true
+}}
+
+fn fetch(req: Request): Response {{
+    if req.path() == "/events" {{
+        return server.sse(events)
+    }}
+    return server.response(200, "ok")
+}}
+"#
+        ),
+    )
+    .expect("write the fixture program");
+
+    let port = noeta_test_temp::free_port();
+    let log = noeta_test_temp::ServerLog::new("live-stream-abandoned");
+    let mut child = log
+        .spawn(Command::new(env!("CARGO_BIN_EXE_noeta")).args([
+            "serve",
+            program.to_str().unwrap(),
+            "--port",
+            &port.to_string(),
+        ]))
+        .expect("spawn `noeta serve`");
+    let addr = format!("127.0.0.1:{port}");
+
+    let outcome = (|| -> Result<(), String> {
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr, &log)?;
+        let mut stream = TcpStream::connect(&addr).map_err(|e| e.to_string())?;
+        stream
+            .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n")
+            .map_err(|e| e.to_string())?;
+        // Read far enough to know the session is running, then leave the way a killed client does.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .map_err(|e| e.to_string())?;
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).map_err(|e| e.to_string())?;
+        if read == 0 {
+            return Err("the server closed the event stream before sending anything".to_string());
+        }
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        drop(stream);
+
+        // The session's own words, read from the server log as it writes them. The budget bounds
+        // this: a handler that never notices says so at roughly `BUDGET` ticks, and the wait is
+        // long enough to let it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let said = std::fs::read_to_string(log.path()).unwrap_or_default();
+            if let Some(line) = said.lines().find(|l| l.contains("session ended at tick")) {
+                let tick: u32 = line
+                    .rsplit(' ')
+                    .next()
+                    .and_then(|n| n.trim().parse().ok())
+                    .ok_or_else(|| format!("no tick number in {line:?}"))?;
+                if tick > SLACK {
+                    return Err(format!(
+                        "the session ran {tick} ticks past a client that left after the first \
+                         frames (at most {SLACK} expected)"
+                    ));
+                }
+                return Ok(());
+            }
+            if said.contains("session ran its whole budget") {
+                return Err(format!(
+                    "the session pushed all {BUDGET} frames into a closed connection: \
+                     `sink.closed()` never reported the departed client"
+                ));
+            }
+            if std::time::Instant::now() > deadline {
+                return Err("the session neither ended nor finished its budget".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.unwrap_or_else(|e| panic!("{}", log.explain(format!("the abandoned stream: {e}"))));
+}

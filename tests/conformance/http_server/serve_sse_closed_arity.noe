@@ -1,0 +1,21 @@
+// `SseSink.closed()` is nullary, and the checker arity-gates it statically, exactly as it gates
+// `Socket.closed()` and every other built-in method. The program is rejected before the serve loop
+// runs, so no request is ever accepted.
+// expect: error E0007 at 10:8
+// expect: exit 1
+use std.http.server
+use std.http.{Request, Response, SseSink, Frame}
+
+async fn events(sink: SseSink): bool {
+    if sink.closed(1) {
+        return false
+    }
+    sink.send(Frame { event: "tick", data: "0", id: "", retry: none })
+    return true
+}
+
+fn fetch(req: Request): Response {
+    return server.sse(events)
+}
+
+server.serve(8080, fetch)
