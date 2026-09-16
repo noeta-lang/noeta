@@ -1,21 +1,26 @@
 // `SseSink.closed()` is nullary, and the checker arity-gates it statically, exactly as it gates
-// `Socket.closed()` and every other built-in method. The program is rejected before the serve loop
-// runs, so no request is ever accepted.
-// expect: error E0007 at 10:8
+// `Socket.closed()` and every other built-in method.
+//
+// The bad call sits in a function nothing calls, and the program prints if it runs. A runtime arity
+// check inside the dispatch raises the same code at the same span, so a case that called
+// `sink.closed(1)` from a live session would stay green with the static rule gone; here E0007 can
+// only come from the checker, and the echo can only appear if the call was accepted.
+// expect: error E0007 at 15:8
 // expect: exit 1
 use std.http.server
-use std.http.{Request, Response, SseSink, Frame}
+use std.http.{Request, Response, SseSink}
 
-async fn events(sink: SseSink): bool {
+fn never_called(sink: SseSink): bool {
+    // One argument to a 0-parameter method.
     if sink.closed(1) {
         return false
     }
-    sink.send(Frame { event: "tick", data: "0", id: "", retry: none })
     return true
 }
 
 fn fetch(req: Request): Response {
-    return server.sse(events)
+    return server.response(200, "ok")
 }
 
 server.serve(8080, fetch)
+echo "this program runs only if the call above was accepted"
