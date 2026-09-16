@@ -157,10 +157,20 @@ impl ChannelCore {
         WAKE.notify();
     }
 
-    /// Whether the channel is still open — a stalled scheduler keeps polling while any open shared
-    /// channel could yet be fed/drained by another isolate thread (rather than declaring a deadlock).
-    pub fn is_open(&self) -> bool {
-        !self.inner.lock().expect("channel mutex poisoned").closed
+    /// Whether this channel still represents outstanding work for a stalled scheduler, so it keeps
+    /// polling rather than declaring a deadlock. Two ways that holds: the channel is **open**, so
+    /// another isolate thread could yet feed or drain it, or it is closed and still **holds
+    /// messages**, which a receiver will take on its next poll.
+    ///
+    /// The second case is why this asks about the queue and not just the flag. A receiver polls, finds
+    /// the queue empty and the channel open, and only then decides whether it is stalled; a sender on
+    /// another thread that pushes and closes in between leaves that receiver looking at a closed
+    /// channel with its own message sitting in it. Reading only the flag there reports "no
+    /// counterparty" and aborts the program with E0010, one poll away from the value it was waiting
+    /// for, and the wider the machine's load the wider that gap gets.
+    pub fn is_pending(&self) -> bool {
+        let inner = self.inner.lock().expect("channel mutex poisoned");
+        !inner.closed || !inner.queue.is_empty()
     }
 }
 
@@ -185,6 +195,50 @@ pub struct StallRegistry {
 
 /// The one process-wide stall registry (see [`StallRegistry`]).
 pub static STALL: StallRegistry = StallRegistry::new();
+
+/// Dev-only **spawn-window delay** (`NOETA_ISOLATE_SPAWN_DELAY_MS`, read once per process): how long
+/// the parent thread pauses immediately after starting an isolate worker's thread, before finishing
+/// the rest of its own spawn bookkeeping.
+///
+/// A worker's thread is live from before the parent's next instruction, so everything the parent
+/// still owes that worker — its [`STALL`] slot above all — is owed across a window the OS scheduler
+/// can stretch to milliseconds on a loaded machine. That is a race to reproduce and a certainty to
+/// assert, so this knob puts the parent in the window on demand and a test reads the registry's
+/// accounting there without racing for it. Unset (the default) costs one cached load per real spawn.
+/// Dev-only **stall-check delay** (`NOETA_ISOLATE_STALL_CHECK_DELAY_MS`, read once per process): how
+/// long a scheduler that has just found no local progress waits before reading the cross-thread state
+/// it judges itself by.
+///
+/// A scheduler decides whether it is stalled from what its last poll saw, and reads the channels a
+/// moment later. On a loaded machine that gap stretches, and another thread's send and close can land
+/// inside it, so the reader judges itself against a channel state its poll never saw. This knob opens
+/// the gap on demand, which is what lets a test put a message there instead of racing the OS
+/// scheduler for the same placement. Unset (the default) costs one cached load per stall round.
+pub fn stall_check_delay() {
+    static DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY_MS.get_or_init(|| {
+        std::env::var("NOETA_ISOLATE_STALL_CHECK_DELAY_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+pub fn spawn_window_delay() {
+    static DELAY_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY_MS.get_or_init(|| {
+        std::env::var("NOETA_ISOLATE_SPAWN_DELAY_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
 
 /// An RAII registration of one parallel scheduler in the [`STALL`] registry: increments `active` on
 /// creation, decrements it on drop (so an unwinding abort de-registers cleanly).
@@ -221,11 +275,12 @@ impl StallRegistry {
     }
 
     /// Register one more parallel scheduler slot. Used directly (not via the RAII guard) for an
-    /// **isolate worker**, whose slot is added by the *parent* thread at spawn — synchronously with
-    /// `inflight_isolates += 1` — so `active` never lags a spawned-but-not-yet-started worker. That
-    /// lag was the false-positive: the parent, alone-registered while its workers' threads were still
-    /// starting, saw `parked == active` and latched a deadlock on a channel-free join. See
-    /// [`deregister`](Self::deregister) for the matching drop.
+    /// **isolate worker**, whose slot the *parent* thread takes **before** starting the worker's
+    /// thread, so `active` counts that worker from before its first instruction. A slot taken any
+    /// later leaves a live worker uncounted for as long as the machine keeps the parent off-CPU, and a
+    /// park in there reads `parked == active` with the parent still running — the false positive, an
+    /// E0010 deadlock on a channel-free join. See [`deregister`](Self::deregister) for the matching
+    /// drop, which runs after the worker's thread is joined, for the same reason in reverse.
     pub fn register(&self) {
         self.active
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);

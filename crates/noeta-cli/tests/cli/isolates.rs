@@ -411,6 +411,154 @@ fn run_real_isolate_channel_deadlock_errors_not_hangs() {
         .stderr(predicate::str::contains("deadlock"));
 }
 
+// The pair below pins the stall registry's accounting across a worker's **startup window** — from the
+// moment the worker's thread is live to the moment the parent has finished the bookkeeping that
+// thread depends on. `active` counts the schedulers that may still wake someone; `parked` counts
+// those blocked. A worker that parks while `active` has not yet counted it drives `parked` up to
+// `active` with the parent still running, and the park confirms an all-parties-blocked state that is
+// not one, so a correct program aborts with E0010 wherever the parent happened to be driving.
+//
+// `NOETA_ISOLATE_SPAWN_DELAY_MS` holds the parent in that window for a fixed time instead of waiting
+// for a loaded machine to put it there, which turns a race that reproduces a few times in a thousand
+// spawns into a certainty. The delay sits immediately after the worker's thread starts, so it covers
+// any parent-side step that drifts back across the spawn, not one particular line.
+//
+// Both directions matter, and one test cannot hold them: over-counting `active` makes the false
+// positive impossible *and* makes a genuine deadlock hang forever, which nothing else in the suite
+// would notice. So the first case proves a program that cannot deadlock survives the window, and the
+// second proves a program that genuinely does still reports E0010 from inside the same window.
+// scripts/isolate-stall-stress.sh is the racing form, for measuring a rate by hand.
+
+/// The delay that holds the parent inside the spawn window. Comfortably past the stall check's own
+/// confirm quantum and past a debug-build worker's startup, so the worker is parked and waiting well
+/// before the parent leaves the window.
+const SPAWN_WINDOW_DELAY_MS: &str = "250";
+
+#[test]
+fn run_real_isolate_spawn_window_is_not_a_false_deadlock() {
+    // Two workers whose first scheduler step is a blocking `recv` — the earliest a real isolate can
+    // park, and so the earliest it can consume a registry slot it has not been given. The parent
+    // feeds and closes both channels, so nothing here can deadlock and every E0010 is a false one.
+    let file = temp_program(
+        "isolate_spawn_window",
+        "async fn waiter(rx: Receiver<int>): int {\n\
+         r = rx.recv().await\n\
+         return match r { some(x) => x, none => 0 }\n\
+         }\n\
+         async fn run(): int {\n\
+         (tx1, rx1) = channel::<int>(1)\n\
+         (tx2, rx2) = channel::<int>(1)\n\
+         mut a = 0\n\
+         mut b = 0\n\
+         concurrent {\n\
+         h1 = isolate waiter(rx1)\n\
+         h2 = isolate waiter(rx2)\n\
+         tx1.send(3).await\n\
+         tx1.close()\n\
+         tx2.send(4).await\n\
+         tx2.close()\n\
+         a = h1.await\n\
+         b = h2.await\n\
+         }\n\
+         return a + b\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .env("NOETA_ISOLATE_SPAWN_DELAY_MS", SPAWN_WINDOW_DELAY_MS)
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout("7\n");
+}
+
+#[test]
+fn run_real_isolate_spawn_window_still_detects_a_real_deadlock() {
+    // The same window, over a worker that blocks forever on a channel nobody feeds while the parent
+    // awaits it. Detection must survive whatever keeps the case above from false-positiving: E0010,
+    // still inside the timeout.
+    let file = temp_program(
+        "isolate_spawn_window_deadlock",
+        "async fn stuck(rx: Receiver<int>): int {\n\
+         r = rx.recv().await\n\
+         return match r { some(x) => x, none => 0 }\n\
+         }\n\
+         async fn run(): int {\n\
+         (tx, rx) = channel::<int>(1)\n\
+         mut result = 0\n\
+         concurrent {\n\
+         h = isolate stuck(rx)\n\
+         result = h.await\n\
+         }\n\
+         return result\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .env("NOETA_ISOLATE_SPAWN_DELAY_MS", SPAWN_WINDOW_DELAY_MS)
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0010"))
+        .stderr(predicate::str::contains("deadlock"));
+}
+
+// A receiver decides whether it is stalled from what its last poll saw, and reads the channel state
+// it judges itself by a moment later. A sender on another thread that pushes and closes inside that
+// gap leaves the receiver judging a closed channel that holds its own message. Reading the closed
+// flag alone calls that an absent counterparty and aborts with E0010, one poll away from the value.
+//
+// Racing for the gap is not worth running as a test: on a loaded box this placement lands about one
+// run in ten, and on a quiet one it does not land at all, so the case would pass without ever
+// reaching its claim. `NOETA_ISOLATE_STALL_CHECK_DELAY_MS` holds the receiver in the gap instead, and
+// `NOETA_ISOLATE_SPAWN_DELAY_MS` keeps the sender out of it until the receiver is in it. The two
+// together make the ordering the test names the ordering it gets.
+
+/// Holds the receiver in the gap between its poll and its stall check. Longer than the spawn delay
+/// below by enough that the sender's send and close land while the receiver is still in there.
+const STALL_CHECK_DELAY_MS: &str = "750";
+
+/// Keeps the sender out of the gap until the receiver has reached it: the worker's thread starts,
+/// runs to its first `recv`, finds the channel empty, and enters the stall check, all while the
+/// parent is still inside the spawn.
+const SENDER_HOLD_MS: &str = "250";
+
+#[test]
+fn run_real_isolate_closed_channel_still_delivers_its_queued_message() {
+    let file = temp_program(
+        "isolate_closed_channel_drain",
+        "async fn waiter(rx: Receiver<int>): int {\n\
+         r = rx.recv().await\n\
+         return match r { some(x) => x, none => 0 }\n\
+         }\n\
+         async fn run(): int {\n\
+         (tx, rx) = channel::<int>(1)\n\
+         mut got = 0\n\
+         concurrent {\n\
+         h = isolate waiter(rx)\n\
+         tx.send(7).await\n\
+         tx.close()\n\
+         got = h.await\n\
+         }\n\
+         return got\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .env("NOETA_ISOLATE_STALL_CHECK_DELAY_MS", STALL_CHECK_DELAY_MS)
+        .env("NOETA_ISOLATE_SPAWN_DELAY_MS", SENDER_HOLD_MS)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stdout("7\n");
+}
+
 // --- real-path cancellation (isolate-cancel) ----------------------------------------
 //
 // The deterministic sandbox cancels a *cooperative* task, which is already parked between polls, so
